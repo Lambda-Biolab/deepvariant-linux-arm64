@@ -180,13 +180,13 @@ echo "Benchmark results saved to ${OUTPUT_DIR}/benchmark_result.json"
 # Accuracy validation
 if [[ "${RUN_ACCURACY}" == "true" ]]; then
   echo ""
-  echo "========== Running Accuracy Validation (hap.py)"
+  echo "========== Running Accuracy Validation (rtg vcfeval)"
   bash "$(dirname "$0")/validate_accuracy.sh" \
     --vcf "${OUTPUT_DIR}/HG003_arm64.vcf.gz" \
     --truth-vcf "${DATA_DIR}/${TRUTH_VCF}" \
     --truth-bed "${DATA_DIR}/${TRUTH_BED}" \
     --ref "${DATA_DIR}/${REF}" \
-    --output-dir "${OUTPUT_DIR}/happy_results"
+    --output-dir "${OUTPUT_DIR}/rtg_results"
 fi
 
 echo ""
