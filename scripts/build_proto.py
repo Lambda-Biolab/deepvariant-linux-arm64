@@ -1,5 +1,4 @@
-#!/bin/bash
-# Copyright 2020 Google LLC.
+# Copyright 2025 Google LLC.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -27,65 +26,44 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-#
-#
 
-set -eux -o pipefail
+"""Generates Python files from .proto files.
 
-echo ========== This script has been tested on Ubuntu22.04.
-echo ========== Run this script in root mode.
+Extracted from root setup.py to decouple proto generation from Python packaging.
+Run from repo root: python scripts/build_proto.py
+"""
 
-ABSL_PIN="${ABSL_PIN-29bf8085f3bf17b84d30e34b3d7ff8248fda404e}"
+import glob
+import os
+import shutil
+import subprocess
+import sys
 
-APT_ARGS=(
-"-y"
-)
+
+def _find_protoc():
+    """Locate protoc binary from env or PATH."""
+    if 'PROTOC' in os.environ and os.path.exists(os.environ['PROTOC']):
+        return os.environ['PROTOC']
+    return shutil.which('protoc')
 
 
-apt-get update  "${APT_ARGS[@]}"
-NEEDRESTART_MODE=a apt-get install "${APT_ARGS[@]}" --no-install-recommends \
-    autoconf \
-    automake \
-    cmake \
-    curl \
-    gpg-agent \
-    g++ \
-    libtool \
-    make \
-    pkg-config \
-    software-properties-common \
-    wget \
-    unzip
+def generate_proto(source):
+    """Generates Python files from .proto files."""
+    protoc = _find_protoc()
+    if not protoc or not os.path.exists(source):
+        return
+    if os.path.isdir(source):
+        files = glob.glob(os.path.join(source, '*.proto'))
+    else:
+        files = [source]
 
-# Install dependencies
-apt-get update "${APT_ARGS[@]}"
-NEEDRESTART_MODE=a apt-get install "${APT_ARGS[@]}" \
-    clang-14 \
-    libclang-14-dev \
-    libgoogle-glog-dev \
-    libgtest-dev \
-    libllvm14 \
-    llvm-14 \
-    llvm-14-dev \
-    llvm-14-linker-tools \
-    python3-dev \
-    zlib1g-dev
+    for f in files:
+        protoc_command = [protoc, '-I.', '--python_out=.', f]
+        print(protoc_command)
+        if subprocess.call(protoc_command) != 0:
+            sys.exit(-1)
 
-# Compile and install absl-cpp from source
-git clone https://github.com/abseil/abseil-cpp.git
-cd abseil-cpp
-if [[ ! -z ${ABSL_PIN} ]]; then
-  git checkout "${ABSL_PIN}"
-fi
-mkdir build && cd build
-cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=true
-make install
-cd ../..
-rm -rf abseil-cpp
 
-# Install python runtime and test dependencies
-uv pip install absl-py parameterized
-
-# On GPU machines, this might be necessary because of the reason mentioned in:
-# https://stackoverflow.com/a/74605488
-NEEDRESTART_MODE=a apt-get install "${APT_ARGS[@]}" libstdc++-12-dev
+if __name__ == '__main__':
+    generate_proto('deepvariant/protos/')
+    generate_proto('third_party/nucleus/protos/')
