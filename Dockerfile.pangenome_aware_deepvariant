@@ -60,7 +60,8 @@ RUN ./run-prereq.sh && \
     uv pip install --no-cache \
         --reinstall-package cryptography --reinstall-package cffi \
         cryptography cffi "httplib2<0.22" absl-py==0.13.0 onnxruntime onnx && \
-    uv pip install --no-cache etils
+    uv pip install --no-cache etils && \
+    python3 -c "import etils, onnxruntime; print(f'OK: etils {etils.__version__}, ort {onnxruntime.__version__}')"
 
 RUN apt-get purge -y --auto-remove \
         gcc cpp pkg-config git curl \
@@ -108,9 +109,17 @@ ADD https://storage.googleapis.com/deepvariant/models/DeepVariant/${VERSION_DEEP
 RUN chmod -R +r /opt/models/pangenome_aware_deepvariant/wes/*
 
 
+# Reason: docker_entrypoint.sh auto-detects BF16, AmpereOne SIGILL guard,
+# jemalloc, OMP threads — critical for cross-platform ARM64 correctness.
+COPY scripts/docker_entrypoint.sh /opt/deepvariant/bin/docker_entrypoint.sh
+COPY scripts/autoconfig.sh /opt/deepvariant/scripts/autoconfig.sh
+RUN chmod +x /opt/deepvariant/bin/docker_entrypoint.sh \
+             /opt/deepvariant/scripts/autoconfig.sh
+
 ENV PATH="${PATH}:/opt/deepvariant/bin/pangenome_aware_deepvariant:/opt/deepvariant/bin"
 ENV PYTHONPATH="/opt/venv/lib/python3.10/site-packages"
 
 WORKDIR /opt/deepvariant
 
+ENTRYPOINT ["/opt/deepvariant/bin/docker_entrypoint.sh"]
 CMD ["/opt/deepvariant/bin/run_pangenome_aware_deepvariant", "--help"]
