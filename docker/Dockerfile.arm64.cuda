@@ -12,7 +12,18 @@
 # Run (requires NVIDIA Container Toolkit on host):
 #   docker run --gpus all deepvariant-arm64-cuda ...
 #
-# Tested on: AWS g5g (Graviton2 + NVIDIA T4G), target: NVIDIA DGX Spark (GB10)
+# GPU compute capability support (from TF build info):
+#   sm_70 (Volta/V100), sm_72 (Xavier), sm_80 (A100), sm_86 (A10/A30/A40),
+#   compute_87 (PTX — forward-compatible to sm_87+ via JIT)
+#
+# Supported platforms:
+#   - NVIDIA DGX Spark (GB10 Blackwell, sm_121) — via PTX JIT (compute_87 < 121)
+#   - NVIDIA Jetson Orin (Ampere, sm_87) — native
+#   - NVIDIA A100/A10/A40 (Ampere, sm_80/sm_86) — native
+#
+# NOT supported:
+#   - AWS g5g (NVIDIA T4G, Turing, sm_75) — sm_75 not compiled, PTX is compute_87
+#     (forward-only; 87 > 75 so T4G cannot JIT it). Use CPU image on g5g.
 
 ARG BUILDER_IMAGE=ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.10.0
 ARG FROM_IMAGE=nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04
