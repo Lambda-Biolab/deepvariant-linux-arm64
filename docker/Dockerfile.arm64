@@ -14,7 +14,7 @@
 # NOTE: Ubuntu 24.04 required — GCC 13+ needed for TF 2.13.1 compilation.
 # Python 3.10 managed by uv (required by TF 2.13.1).
 
-ARG BUILDER_IMAGE=ghcr.io/antomicblitz/deepvariant-linux-arm64:base-builder-v1.9.0
+ARG BUILDER_IMAGE=ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.9.0
 ARG FROM_IMAGE=arm64v8/ubuntu:24.04
 ARG VERSION=1.9.0
 

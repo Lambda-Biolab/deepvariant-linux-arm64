@@ -6,7 +6,7 @@
 #
 # Runs INSIDE the Docker container (not on the host). Use it as:
 #
-#   docker run -v /data:/data ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.5 \
+#   docker run -v /data:/data ghcr.io/lambda-biolab/deepvariant-arm64:v1.9.0-arm64.5 \
 #     /opt/deepvariant/scripts/run_parallel_cv.sh \
 #     --model_type=WGS \
 #     --ref=/data/reference.fasta \
