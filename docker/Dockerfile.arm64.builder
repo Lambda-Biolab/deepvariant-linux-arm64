@@ -6,8 +6,8 @@
 #
 # Build and push the base builder image:
 #   docker build -f docker/Dockerfile.arm64.builder \
-#     -t ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.9.0 .
-#   docker push ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.9.0
+#     -t ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.10.0 .
+#   docker push ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.10.0
 #
 # Rebuild only when: C++ source, Bazel config, TF version, or build scripts change.
 # The runtime Dockerfile (Dockerfile.arm64) references this image by default.
@@ -15,7 +15,7 @@
 ARG FROM_IMAGE=arm64v8/ubuntu:24.04
 ARG PYTHON_VERSION=3.10
 ARG DV_GPU_BUILD=0
-ARG VERSION=1.9.0
+ARG VERSION=1.10.0
 
 FROM ${FROM_IMAGE} AS builder
 LABEL maintainer="https://github.com/qte77/deepvariant-linux-arm64/issues" \

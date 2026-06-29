@@ -14,9 +14,9 @@
 # NOTE: Ubuntu 24.04 required — GCC 13+ needed for TF 2.13.1 compilation.
 # Python 3.10 managed by uv (required by TF 2.13.1).
 
-ARG BUILDER_IMAGE=ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.9.0
+ARG BUILDER_IMAGE=ghcr.io/lambda-biolab/deepvariant-linux-arm64:base-builder-v1.10.0
 ARG FROM_IMAGE=arm64v8/ubuntu:24.04
-ARG VERSION=1.9.0
+ARG VERSION=1.10.0
 
 # --- Stage 1: pre-built Bazel binaries ---------------------------------------
 FROM ${BUILDER_IMAGE} AS builder
@@ -40,6 +40,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /opt
 
 # Download all SavedModels in a single layer
+# v1.10.0: example_info.json renamed to model.example_info.json
+# v1.10.0: added rnaseq model
 ARG GCS=https://storage.googleapis.com/deepvariant/models/DeepVariant
 RUN set -e && \
     for model in wgs wes pacbio; do \
@@ -48,42 +50,35 @@ RUN set -e && \
              -O /opt/models/${model}/fingerprint.pb && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${model}.savedmodel/saved_model.pb" \
              -O /opt/models/${model}/saved_model.pb && \
-        wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${model}.savedmodel/example_info.json" \
-             -O /opt/models/${model}/example_info.json && \
+        wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${model}.savedmodel/model.example_info.json" \
+             -O /opt/models/${model}/model.example_info.json && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${model}.savedmodel/variables/variables.data-00000-of-00001" \
              -O /opt/models/${model}/variables/variables.data-00000-of-00001 && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${model}.savedmodel/variables/variables.index" \
              -O /opt/models/${model}/variables/variables.index; \
     done && \
-    # Models with non-standard directory names
-    for pair in "hybrid_pacbio_illumina:hybrid" "ont_r104:ont" "masseq:masseq"; do \
+    # Models with non-standard directory names (slug differs from dir name)
+    # v1.10.0: added rnaseq
+    for pair in "hybrid_pacbio_illumina:hybrid" "ont_r104:ont" "masseq:masseq" "rnaseq:rnaseq"; do \
         dir="${pair%%:*}"; slug="${pair##*:}"; \
         mkdir -p /opt/models/${dir}/variables && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${slug}.savedmodel/fingerprint.pb" \
              -O /opt/models/${dir}/fingerprint.pb && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${slug}.savedmodel/saved_model.pb" \
              -O /opt/models/${dir}/saved_model.pb && \
-        wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${slug}.savedmodel/example_info.json" \
-             -O /opt/models/${dir}/example_info.json && \
+        wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${slug}.savedmodel/model.example_info.json" \
+             -O /opt/models/${dir}/model.example_info.json && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${slug}.savedmodel/variables/variables.data-00000-of-00001" \
              -O /opt/models/${dir}/variables/variables.data-00000-of-00001 && \
         wget -q "${GCS}/${VERSION}/savedmodels/deepvariant.${slug}.savedmodel/variables/variables.index" \
              -O /opt/models/${dir}/variables/variables.index; \
     done && \
-    # Small models (have keras_metadata.pb instead of example_info.json)
+    # Small models (v1.10.0: Keras 3 format — single model.keras file)
     for pair in "wgs:wgs" "pacbio:pacbio" "ont_r104:ont"; do \
         dir="${pair%%:*}"; slug="${pair##*:}"; \
-        mkdir -p /opt/smallmodels/${dir}/variables && \
-        wget -q "${GCS}/${VERSION}/smallmodels/deepvariant.${slug}.smallmodel/fingerprint.pb" \
-             -O /opt/smallmodels/${dir}/fingerprint.pb && \
-        wget -q "${GCS}/${VERSION}/smallmodels/deepvariant.${slug}.smallmodel/saved_model.pb" \
-             -O /opt/smallmodels/${dir}/saved_model.pb && \
-        wget -q "${GCS}/${VERSION}/smallmodels/deepvariant.${slug}.smallmodel/keras_metadata.pb" \
-             -O /opt/smallmodels/${dir}/keras_metadata.pb && \
-        wget -q "${GCS}/${VERSION}/smallmodels/deepvariant.${slug}.smallmodel/variables/variables.data-00000-of-00001" \
-             -O /opt/smallmodels/${dir}/variables/variables.data-00000-of-00001 && \
-        wget -q "${GCS}/${VERSION}/smallmodels/deepvariant.${slug}.smallmodel/variables/variables.index" \
-             -O /opt/smallmodels/${dir}/variables/variables.index; \
+        mkdir -p /opt/smallmodels/${dir} && \
+        wget -q "${GCS}/${VERSION}/smallmodels/deepvariant.${slug}.smallmodel/model.keras" \
+             -O /opt/smallmodels/${dir}/model.keras; \
     done && \
     chmod -R +r /opt/models /opt/smallmodels
 
