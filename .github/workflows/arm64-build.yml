@@ -37,7 +37,9 @@ on:
 env:
   DOCKER_IMAGE: deepvariant-arm64
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Reason: Docker requires lowercase repository names. github.repository
+  # preserves case (Lambda-Biolab), which causes "invalid tag" errors.
+  IMAGE_NAME: lambda-biolab/deepvariant-linux-arm64
 
 jobs:
   # Rebuild the base builder image from source (Bazel compilation).
@@ -52,7 +54,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Read project version
         id: version
@@ -64,17 +66,17 @@ jobs:
           echo "builder_tag=base-builder-v${upstream_version}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push base builder image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           file: docker/Dockerfile.arm64.builder
@@ -101,7 +103,7 @@ jobs:
       image_tag: ${{ steps.image-check.outputs.image_tag }}
       image_changed: ${{ steps.image-check.outputs.exists != 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Read project version
         id: version
@@ -112,10 +114,10 @@ jobs:
           echo "builder_tag=base-builder-v${upstream_version}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -147,7 +149,7 @@ jobs:
       - name: Docker meta (tags)
         if: steps.image-check.outputs.exists != 'true'
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -157,7 +159,7 @@ jobs:
 
       - name: Build and push ARM64 Docker image
         if: steps.image-check.outputs.exists != 'true'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           file: docker/Dockerfile.arm64
@@ -191,10 +193,10 @@ jobs:
     env:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -202,7 +204,7 @@ jobs:
 
       - name: Snyk container scan
         if: env.HAS_SNYK_TOKEN == 'true'
-        uses: snyk/actions/docker@master
+        uses: snyk/actions/docker@8e119fbb6c251787721d34ba683ed48eba792766 # master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -212,7 +214,7 @@ jobs:
 
       - name: Snyk IaC scan (Dockerfiles)
         if: env.HAS_SNYK_TOKEN == 'true'
-        uses: snyk/actions/iac@master
+        uses: snyk/actions/iac@8e119fbb6c251787721d34ba683ed48eba792766 # master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -220,13 +222,13 @@ jobs:
         continue-on-error: true
 
       - name: Upload container SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         with:
           sarif_file: snyk-container.sarif
         if: always() && hashFiles('snyk-container.sarif') != ''
 
       - name: Upload IaC SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@411bbbe57033eedfc1a82d68c01345aa96c737d7 # v4
         with:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
@@ -234,7 +236,7 @@ jobs:
 
       - name: Snyk monitor (track in dashboard)
         if: env.HAS_SNYK_TOKEN == 'true' && github.ref == 'refs/heads/main'
-        uses: snyk/actions/docker@master
+        uses: snyk/actions/docker@8e119fbb6c251787721d34ba683ed48eba792766 # master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -257,10 +259,10 @@ jobs:
       && github.event_name != 'pull_request'
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -282,7 +284,7 @@ jobs:
             --docker-image "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-arm64.outputs.image_tag }}"
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-results-fp32
           path: |
@@ -350,7 +352,7 @@ jobs:
       NUM_SHARDS: "4"
       NUM_CALIBRATION_SAMPLES: "500"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Read project version
         id: version
@@ -359,13 +361,13 @@ jobs:
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: oras-project/setup-oras@v1
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1
 
       - name: Check if INT8 model already exists in GHCR
         id: int8-check
@@ -456,7 +458,7 @@ jobs:
 
       - name: Upload INT8 model artifact
         if: steps.int8-check.outputs.exists != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: int8-model-${{ matrix.model_type }}-${{ steps.version.outputs.tag }}
           path: /tmp/int8-output/model_int8_static_${{ matrix.model_type }}.onnx
@@ -496,9 +498,9 @@ jobs:
       IMAGE_TAG: ${{ needs.build-arm64.outputs.image_tag }}
       REF: GRCh38_no_alt_analysis_set.fasta
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: oras-project/setup-oras@v1
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1
 
       - name: Read project version
         id: version
@@ -522,7 +524,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: steps.should-run.outputs.run == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -612,7 +614,7 @@ jobs:
 
       - name: Upload benchmark results
         if: steps.should-run.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-results-int8-${{ matrix.model_type }}
           path: |
