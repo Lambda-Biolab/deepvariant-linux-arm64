@@ -37,7 +37,9 @@ on:
 env:
   DOCKER_IMAGE: deepvariant-arm64
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Reason: Docker requires lowercase repository names. github.repository
+  # preserves case (Lambda-Biolab), which causes "invalid tag" errors.
+  IMAGE_NAME: lambda-biolab/deepvariant-linux-arm64
 
 jobs:
   # Rebuild the base builder image from source (Bazel compilation).
