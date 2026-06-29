@@ -1,5 +1,9 @@
 # DeepVariant — Linux ARM64 Native Build
 
+[![CI](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/actions/workflows/ci.yml/badge.svg)](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/actions/workflows/ci.yml)
+[![ARM64 Build & Test](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/actions/workflows/arm64-build.yml/badge.svg)](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/actions/workflows/arm64-build.yml)
+[![CodeQL](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/actions/workflows/codeql.yaml/badge.svg)](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/actions/workflows/codeql.yaml)
+[![Dependabot](https://img.shields.io/badge/dependabot-active-blue?logo=dependabot)](https://github.com/Lambda-Biolab/deepvariant-linux-arm64/network/updates)
 [![release](https://img.shields.io/badge/base-v1.9.0-green?logo=github)](https://github.com/google/deepvariant/releases)
 [![platform](https://img.shields.io/badge/platform-Linux%20ARM64-blue?logo=linux)](https://en.wikipedia.org/wiki/AArch64)
 [![accuracy](https://img.shields.io/badge/SNP%20F1-0.9961%20(full%20genome)-success)](#accuracy--full-genome-validation)

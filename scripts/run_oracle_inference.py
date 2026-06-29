@@ -39,11 +39,9 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Optional
+from typing import Any
 
-from absl import app
-from absl import flags
-from absl import logging
+from absl import app, flags, logging
 
 FLAGS = flags.FLAGS
 
@@ -210,7 +208,7 @@ def _is_quoted(value):
 def _add_quotes(value):
   if isinstance(value, str) and _is_quoted(value):
     return value
-  return '"{}"'.format(value)
+  return f'"{value}"'
 
 
 def trim_suffix(string: str, suffix: str) -> str:
@@ -264,9 +262,7 @@ def _update_kwargs_with_warning(kwargs, extra_args):
     if k in kwargs:
       if kwargs[k] != v:
         print(
-            '\nWarning: --{} is previously set to {}, now to {}.'.format(
-                k, kwargs[k], v
-            )
+            f'\nWarning: --{k} is previously set to {kwargs[k]}, now to {v}.'
         )
     kwargs[k] = v
   return kwargs
@@ -295,22 +291,22 @@ def make_examples_command(
   """
   command = [
       'time',
-      'seq 0 {} |'.format(_NUM_SHARDS.value - 1),
+      f'seq 0 {_NUM_SHARDS.value - 1} |',
       'parallel -q --halt 2 --line-buffer',
       '/opt/deepvariant/bin/make_examples',
   ]
   command.extend(['--mode', 'training'])
-  command.extend(['--ref', '"{}"'.format(ref)])
-  command.extend(['--reads', '"{}"'.format(reads)])
-  command.extend(['--labeler_algorithm', '"{}"'.format(labeler_algorithm)])
-  command.extend(['--examples', '"{}"'.format(examples)])
+  command.extend(['--ref', f'"{ref}"'])
+  command.extend(['--reads', f'"{reads}"'])
+  command.extend(['--labeler_algorithm', f'"{labeler_algorithm}"'])
+  command.extend(['--examples', f'"{examples}"'])
   command.extend(['--channel_list', '"BASE_CHANNELS"'])
 
   command.extend(['--max_reads_per_partition', '1500'])
   partition_size = 1000
   if _MODEL_TYPE.value in (ModelType.PACBIO.value, ModelType.ONT_R104.value):
     partition_size = 25000
-  command.extend(['--partition_size', '"{}"'.format(partition_size)])
+  command.extend(['--partition_size', f'"{partition_size}"'])
 
   # Extend the command with all items in kwargs and extra_args.
   kwargs = _update_kwargs_with_warning(kwargs, _extra_args_to_dict(extra_args))
@@ -319,7 +315,7 @@ def make_examples_command(
   command.extend(['--task {}'])
   logfile = None
   if _LOGGING_DIR.value:
-    logfile = '{}/make_examples.log'.format(_LOGGING_DIR.value)
+    logfile = f'{_LOGGING_DIR.value}/make_examples.log'
   return (' '.join(command), logfile)
 
 
@@ -328,7 +324,7 @@ def labeled_examples_to_vcf_command(
     examples: str,
     outfile: str,
     sample_name: str,
-) -> tuple[str, Optional[str]]:
+) -> tuple[str, str | None]:
   """Returns a labeled_examples_to_vcf (command, logfile) for subprocess.
 
   Args:
@@ -342,20 +338,20 @@ def labeled_examples_to_vcf_command(
   """
   binary_name = 'labeled_examples_to_vcf'
   command = ['time', f'/opt/deepvariant/bin/{binary_name}']
-  command.extend(['--ref', '"{}"'.format(ref)])
-  command.extend(['--examples', '"{}"'.format(examples)])
-  command.extend(['--output_vcf', '"{}"'.format(outfile)])
+  command.extend(['--ref', f'"{ref}"'])
+  command.extend(['--examples', f'"{examples}"'])
+  command.extend(['--output_vcf', f'"{outfile}"'])
   if sample_name:
-    command.extend(['--sample_name', '"{}"'.format(sample_name)])
+    command.extend(['--sample_name', f'"{sample_name}"'])
 
   logfile = None
   if _LOGGING_DIR.value:
-    logfile = '{}/{}.log'.format(_LOGGING_DIR.value, binary_name)
+    logfile = f'{_LOGGING_DIR.value}/{binary_name}.log'
   return (' '.join(command), logfile)
 
 
 def check_or_create_intermediate_results_dir(
-    intermediate_results_dir: Optional[str],
+    intermediate_results_dir: str | None,
 ) -> str:
   """Checks or creates the path to the directory for intermediate results."""
   if intermediate_results_dir is None:
@@ -395,7 +391,7 @@ def create_all_commands_and_logfiles(
   # make_examples
   examples = os.path.join(
       intermediate_results_dir,
-      'make_examples.tfrecord@{}.gz'.format(_NUM_SHARDS.value),
+      f'make_examples.tfrecord@{_NUM_SHARDS.value}.gz',
   )
   commands.append(
       make_examples_command(
@@ -429,7 +425,7 @@ def create_all_commands_and_logfiles(
 
 def main(_):
   if _VERSION.value:
-    print('DeepVariant version {}'.format(DEEP_VARIANT_VERSION))
+    print(f'DeepVariant version {DEEP_VARIANT_VERSION}')
     return
 
   for flag_key in [
@@ -441,7 +437,7 @@ def main(_):
       'confident_regions',
   ]:
     if FLAGS.get_flag_value(flag_key, None) is None:
-      sys.stderr.write('--{} is required.\n'.format(flag_key))
+      sys.stderr.write(f'--{flag_key} is required.\n')
       sys.stderr.write('Pass --helpshort or --helpfull to see help on flags.\n')
       sys.exit(1)
 
@@ -455,16 +451,16 @@ def main(_):
 
   commands_logfiles = create_all_commands_and_logfiles(intermediate_results_dir)
   print(
-      '\n***** Intermediate results will be written to {} '
-      'in docker. ****\n'.format(intermediate_results_dir)
+      f'\n***** Intermediate results will be written to {intermediate_results_dir} '
+      'in docker. ****\n'
   )
   env = os.environ.copy()
   logging.info('env = %s', env)
   for command, logfile in commands_logfiles:
-    print('\n***** Running the command:*****\n{}\n'.format(command))
+    print(f'\n***** Running the command:*****\n{command}\n')
     if not _DRY_RUN.value:
       fp = open(logfile, 'w') if logfile is not None else None
-      with subprocess.Popen(
+      with subprocess.Popen(  # noqa: S602 - commands are constructed internally, not from user input
           command,
           stdout=subprocess.PIPE,
           stderr=subprocess.STDOUT,
