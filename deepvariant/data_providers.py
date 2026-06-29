@@ -293,8 +293,6 @@ def read_dataset_config(dataset_config_filename):
         )
     )
 
-  # TODO: remove this check once we're able to deal with absence
-  # of num_examples.
   if not dataset_config.num_examples:
     raise ValueError(
         'The dataset in the config {} does not have a num_examples.'.format(

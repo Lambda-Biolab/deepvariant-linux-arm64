@@ -1,3 +1,7 @@
+
+# load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+# load("@rules_cc//cc:cc_test.bzl", "cc_test")
 # Placeholder: load py_binary
 # Placeholder: load py_library
 # Placeholder: load py_test
@@ -30,7 +34,7 @@ filegroup(
     srcs = glob([
         "testdata/input/*",
         "testdata/obsolete/*",
-        "testdata/*",
+        "testdata/**",
         "multiallelic_model/**",
     ]),
 )
@@ -127,10 +131,11 @@ cc_library(
     hdrs = ["postprocess_variants.h"],
     deps = [
         "//deepvariant/protos:deepvariant_cc_pb2",
+        "//third_party/nucleus/protos:range_cc_pb2",
         "//third_party/nucleus/protos:reference_cc_pb2",
         "//third_party/nucleus/protos:variants_cc_pb2",
         "//third_party/nucleus/util:cpp_utils",
-        "@com_google_absl//absl/strings:cord",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@org_tensorflow//tensorflow/core:lib",
         "@org_tensorflow//tensorflow/core/platform/cloud:gcs_file_system",
     ],
@@ -152,6 +157,7 @@ cc_test(
         "//third_party/nucleus/testing:cpp_test_utils",
         "//third_party/nucleus/util:cpp_utils",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
         "@org_tensorflow//tensorflow/core:lib",
         "@org_tensorflow//tensorflow/core:test",
@@ -241,6 +247,7 @@ cc_test(
         "//deepvariant/protos:deepvariant_cc_pb2",
         "//third_party/nucleus/io:reference",
         "//third_party/nucleus/protos:range_cc_pb2",
+        "//third_party/nucleus/protos:reads_cc_pb2",
         "//third_party/nucleus/protos:reference_cc_pb2",
         "//third_party/nucleus/protos:variants_cc_pb2",
         "//third_party/nucleus/testing:cpp_test_utils",
@@ -443,16 +450,12 @@ py_library(
         ":make_examples_core",
         ":make_examples_options",
         "//deepvariant/protos:deepvariant_py_pb2",
-        "//deepvariant/python:allelecounter",
-        "//deepvariant/python:direct_phasing",
-        "//deepvariant/python:methylation_aware_phasing",
         "//third_party/nucleus/io/python:hts_verbose",
-        "//third_party/nucleus/protos:range_py_pb2",
-        "//third_party/nucleus/protos:reads_py_pb2",
         "//third_party/nucleus/util:errors",
         "//third_party/nucleus/util:proto_utils",
         "@absl_py//absl:app",
         "@absl_py//absl/flags",
+        "@absl_py//absl/logging",
     ],
 )
 
@@ -550,6 +553,7 @@ py_library(
         ":variant_caller",
         ":vcf_candidate_importer",
         ":very_sensitive_caller",
+        "//deepvariant/labeler:combined_labeler",
         "//deepvariant/labeler:customized_classes_labeler",
         "//deepvariant/labeler:haplotype_labeler",
         "//deepvariant/labeler:positional_labeler",
@@ -648,6 +652,7 @@ py_binary(
         "//third_party/nucleus/util:errors",
         "//third_party/nucleus/util:proto_utils",
         "@absl_py//absl/flags",
+        "@absl_py//absl/logging",
         "@absl_py//absl/testing:parameterized",  # buildcleaner: keep
         "@absl_py//absl:app",
     ],
@@ -1048,6 +1053,9 @@ cc_library(
     name = "sampling_util",
     hdrs = ["sampling_util.h"],
     deps = [
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/random:distributions",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -1061,6 +1069,38 @@ cc_library(
     deps = [
         "//deepvariant/protos:deepvariant_cc_pb2",
         "@com_google_absl//absl/log",
+
+cc_test(
+    name = "sampling_util_test",
+    srcs = [
+        "sampling_util_test.cc",
+    ],
+    deps = [
+        ":distribution_functor",
+        ":sampling_util",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_googletest//:gtest_main",
+        "@org_tensorflow//tensorflow/core:test",
+    ],
+)
+
+cc_library(
+    name = "distribution_functor",
+    hdrs = ["distribution_functor.h"],
+    deps = ["@com_google_absl//absl/container:btree"],
+)
+
+cc_test(
+    name = "distribution_functor_test",
+    srcs = [
+        "distribution_functor.h",
+        "distribution_functor_test.cc",
+    ],
+    deps = [
+        ":distribution_functor",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_googletest//:gtest_main",
+        "@org_tensorflow//tensorflow/core:test",
     ],
 )
 
@@ -1079,6 +1119,8 @@ cc_library(
         "//third_party/nucleus/protos:struct_cc_pb2",
         "//third_party/nucleus/protos:variants_cc_pb2",
         "//third_party/nucleus/util:proto_ptr",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:btree",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
@@ -1096,6 +1138,7 @@ cc_library(
     deps = [
         ":image_row",
         "//deepvariant/channels:allele_frequency_channel",
+        "//deepvariant/channels:allele_sample_probability_channel",
         "//deepvariant/channels:avg_base_quality_channel",
         "//deepvariant/channels:base_6ma_channel",
         "//deepvariant/channels:base_differs_from_ref_channel",
@@ -1106,15 +1149,21 @@ cc_library(
         "//deepvariant/channels:gap_compressed_identity_channel",
         "//deepvariant/channels:gc_content_channel",
         "//deepvariant/channels:haplotype_tag_channel",
+        "//deepvariant/channels:homopolymer_deletion_quality_channel",
+        "//deepvariant/channels:homopolymer_indel_quality_channel",
+        "//deepvariant/channels:homopolymer_insertion_quality_channel",
         "//deepvariant/channels:homopolymer_weighted_channel",
         "//deepvariant/channels:identity_channel",
         "//deepvariant/channels:insert_size_channel",
+        "//deepvariant/channels:inter_homopolymer_insertion_quality_channel",
         "//deepvariant/channels:is_homopolymer_channel",
         "//deepvariant/channels:mapping_quality_channel",
         "//deepvariant/channels:read_base_channel",
         "//deepvariant/channels:read_mapping_percent_channel",
         "//deepvariant/channels:read_supports_variant_channel",
+        "//deepvariant/channels:read_supports_variant_fuzzy_channel",
         "//deepvariant/channels:strand_channel",
+        "//deepvariant/channels:supplementary_alignment_channel",
         "//deepvariant/protos:deepvariant_cc_pb2",
         "//third_party/nucleus/protos:cigar_cc_pb2",
         "//third_party/nucleus/protos:position_cc_pb2",
@@ -1134,7 +1183,9 @@ cc_test(
     srcs = ["pileup_channel_lib_test.cc"],
     deps = [
         ":pileup_channel_lib",
+        ":testing_utils",
         "//deepvariant/channels:allele_frequency_channel",
+        "//deepvariant/channels:allele_sample_probability_channel",
         "//deepvariant/channels:avg_base_quality_channel",
         "//deepvariant/channels:blank_channel",
         "//deepvariant/channels:channel",
@@ -1148,13 +1199,14 @@ cc_test(
         "//deepvariant/channels:mapping_quality_channel",
         "//deepvariant/channels:read_mapping_percent_channel",
         "//deepvariant/channels:read_supports_variant_channel",
+        "//deepvariant/channels:read_supports_variant_fuzzy_channel",
         "//deepvariant/channels:strand_channel",
+        "//deepvariant/channels:supplementary_alignment_channel",
         "//deepvariant/protos:deepvariant_cc_pb2",
         "//third_party/nucleus/protos:cigar_cc_pb2",
         "//third_party/nucleus/protos:reads_cc_pb2",
         "//third_party/nucleus/protos:struct_cc_pb2",
         "//third_party/nucleus/testing:cpp_test_utils",
-        "//third_party/nucleus/util:cpp_utils",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_googletest//:gtest_main",
         "@org_tensorflow//tensorflow/core:test",
@@ -1177,23 +1229,27 @@ py_library(
         ":calling_regions_utils",
         "//deepvariant/protos:deepvariant_py_pb2",
         "//deepvariant/python:postprocess_variants",
+        "//deepvariant/python:merge_phased_reads",
+        "//deepvariant/small_model:inference",
         "//third_party/nucleus/io:sharded_file_utils",
         "//third_party/nucleus/io:tabix",
         "//third_party/nucleus/io:tfrecord",
         "//third_party/nucleus/io:vcf",
         "//third_party/nucleus/io/python:merge_variants",
         "//third_party/nucleus/io/python:vcf_concat",
+        "//third_party/nucleus/protos:range_py_pb2",
         "//third_party/nucleus/protos:reference_py_pb2",
-        "//third_party/nucleus/protos:struct_py_pb2",
         "//third_party/nucleus/protos:variants_py_pb2",
         "//third_party/nucleus/util:errors",
         "//third_party/nucleus/util:genomics_math",
         "//third_party/nucleus/util:proto_utils",
+        "//third_party/nucleus/util:ranges",
         "//third_party/nucleus/util:struct_utils",
         "//third_party/nucleus/util:variant_utils",
         "//third_party/nucleus/util:variantcall_utils",
         "@absl_py//absl/flags",
         "@absl_py//absl/logging",
+        "@com_google_protobuf//:protobuf_python",
     ],
 )
 
@@ -1297,6 +1353,7 @@ py_library(
     name = "haplotypes",
     srcs = ["haplotypes.py"],
     deps = [
+        ":dv_vcf_constants",
         "//third_party/nucleus/util:genomics_math",
         "//third_party/nucleus/util:variant_utils",
         "@absl_py//absl/flags",
@@ -1403,6 +1460,7 @@ py_library(
     srcs = ["dv_vcf_constants.py"],
     deps = [
         "//third_party/nucleus/protos:variants_py_pb2",
+        "//third_party/nucleus/util:variant_utils",
         "//third_party/nucleus/util:vcf_constants",
     ],
 )
@@ -1641,7 +1699,6 @@ cc_library(
     hdrs = ["make_examples_native.h"],
     deps = [
         ":alt_aligned_pileup_lib",
-        ":fast_pipeline_utils",
         ":pileup_image_native",
         ":stream_examples",
         "//deepvariant/protos:deepvariant_cc_pb2",
@@ -1670,7 +1727,6 @@ cc_test(
     srcs = ["make_examples_native_test.cc"],
     deps = [
         ":make_examples_native",
-        ":pileup_image_native",
         ":testing_utils",
         "//deepvariant/protos:deepvariant_cc_pb2",
         "//third_party/nucleus/io:reference",
@@ -1693,8 +1749,11 @@ cc_test(
         ":pileup_image_native",
         ":testing_utils",
         "//deepvariant/protos:deepvariant_cc_pb2",
+        "//third_party/nucleus/protos:position_cc_pb2",
         "//third_party/nucleus/protos:reads_cc_pb2",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
         "@org_tensorflow//tensorflow/core:test",
     ],

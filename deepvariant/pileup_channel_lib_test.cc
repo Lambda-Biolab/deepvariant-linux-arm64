@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "deepvariant/channels/allele_frequency_channel.h"
+#include "deepvariant/channels/allele_sample_probability_channel.h"
 #include "deepvariant/channels/avg_base_quality_channel.h"
 #include "deepvariant/channels/blank_channel.h"
 #include "deepvariant/channels/channel.h"
@@ -50,15 +51,17 @@
 #include "deepvariant/channels/mapping_quality_channel.h"
 #include "deepvariant/channels/read_mapping_percent_channel.h"
 #include "deepvariant/channels/read_supports_variant_channel.h"
+#include "deepvariant/channels/read_supports_variant_fuzzy_channel.h"
 #include "deepvariant/channels/strand_channel.h"
+#include "deepvariant/channels/supplementary_alignment_channel.h"
 #include "deepvariant/protos/deepvariant.pb.h"
+#include "deepvariant/testing_utils.h"
 #include "tensorflow/core/platform/test.h"
 #include "absl/container/flat_hash_set.h"
 #include "third_party/nucleus/protos/cigar.pb.h"
 #include "third_party/nucleus/protos/reads.pb.h"
 #include "third_party/nucleus/protos/struct.pb.h"
 #include "third_party/nucleus/testing/test_utils.h"
-#include "third_party/nucleus/util/utils.h"
 
 using nucleus::genomics::v1::Read;
 
@@ -67,16 +70,6 @@ namespace genomics {
 namespace deepvariant {
 
 using ::testing::ValuesIn;
-
-TEST(ScaleColor, BasicCase) {
-  PileupImageOptions options{};
-  Channels channel_set{options};
-  EXPECT_EQ(channel_set.ScaleColor(50, 100), 127);
-  EXPECT_EQ(channel_set.ScaleColor(127, kMaxPixelValueAsFloat), 127);
-  // Beyond max scales to max.
-  EXPECT_EQ(channel_set.ScaleColor(500, kMaxPixelValueAsFloat),
-            kMaxPixelValueAsFloat);
-}
 
 TEST(ScaleColorVector, BasicCase) {
   PileupImageOptions options{};
@@ -232,6 +225,147 @@ TEST(ReadSupportsAlt, OtherAlleleSupporting) {
 
   std::uint8_t rsa = channel.ReadSupportsAlt(dv_call, read, alt_alleles);
   EXPECT_EQ(rsa, 2);
+}
+
+TEST(ReadSupportsAltFuzzy, AlleleUnsupporting) {
+  PileupImageOptions options{};
+  ReadSupportsVariantFuzzyChannel channel(/*width=*/100, options);
+  Read read = nucleus::MakeRead("chr1", 1, "GGGCGCTTTT", {"8M"});
+  DeepVariantCall dv_call = DeepVariantCall::default_instance();
+  std::vector<std::string> alt_alleles = {};
+
+  std::uint8_t rsa = channel.ReadSupportsAlt(dv_call, read, alt_alleles);
+  EXPECT_EQ(rsa, 0);
+}
+
+TEST(ReadSupportsAltFuzzy, AlleleSupporting) {
+  PileupImageOptions options{};
+  ReadSupportsVariantFuzzyChannel channel(/*width=*/100, options);
+  Read read = nucleus::MakeRead("chr1", 1, "GGGCGCTTTT", {"8M"}, "FRAG1");
+  read.set_read_number(1);
+
+  DeepVariantCall_SupportingReads dv_supporting_reads =
+      DeepVariantCall_SupportingReads::default_instance();
+  dv_supporting_reads.add_read_names("FRAG1/1");
+
+  DeepVariantCall dv_call = DeepVariantCall::default_instance();
+
+  dv_call.mutable_variant()->mutable_alternate_bases()->Add("GGGCGCATT");
+
+  dv_call.mutable_allele_support()->insert(
+      google::protobuf::MapPair<std::string, DeepVariantCall_SupportingReads>(
+          "GGGCGCATT", dv_supporting_reads));
+
+  std::vector<std::string> alt_alleles = {"GGGCGCATT"};
+
+  std::uint8_t rsa = channel.ReadSupportsAlt(dv_call, read, alt_alleles);
+  EXPECT_EQ(rsa, 1);
+}
+
+TEST(ReadSupportsAltFuzzy, OtherAlleleSupporting) {
+  PileupImageOptions options{};
+  ReadSupportsVariantFuzzyChannel channel(/*width=*/100, options);
+  Read read = nucleus::MakeRead("chr1", 1, "GGGCGCTTTT", {"8M"}, "FRAG2");
+  read.set_read_number(2);
+
+  DeepVariantCall_SupportingReads dv_supporting_reads =
+      DeepVariantCall_SupportingReads::default_instance();
+  dv_supporting_reads.add_read_names("FRAG2/2");
+
+  DeepVariantCall dv_call = DeepVariantCall::default_instance();
+
+  dv_call.mutable_variant()->mutable_alternate_bases()->Add("GGGCGCATT");
+
+  dv_call.mutable_allele_support()->insert(
+      google::protobuf::MapPair<std::string, DeepVariantCall_SupportingReads>(
+          "GGGCGCATT", dv_supporting_reads));
+
+  std::vector<std::string> alt_alleles = {};
+
+  std::uint8_t rsa = channel.ReadSupportsAlt(dv_call, read, alt_alleles);
+  EXPECT_EQ(rsa, 0);
+}
+
+TEST(ReadSupportsAltFuzzy, OtherAlleleFuzzySupporting) {
+  PileupImageOptions options{};
+  ReadSupportsVariantFuzzyChannel channel(/*width=*/100, options);
+  // Creating 3 reads that support different alt alleles.
+  Read read_1 = MakeRead("chr1", 1, "GGGCGCTT", {"8M"}, "Read1", /*hp_tag=*/1);
+  read_1.set_read_number(1);
+  Read read_2 = MakeRead("chr1", 1, "GGGCGCT", {"8M"}, "Read2", /*hp_tag=*/1);
+  read_2.set_read_number(1);
+  Read read_3 = MakeRead("chr1", 1, "GGGCGCTTT", {"8M"}, "Read3", /*hp_tag=*/1);
+  read_3.set_read_number(1);
+  // Read4 supports allele on a different phase.
+  Read read_4 = MakeRead("chr1", 1, "GGGCGC", {"8M"}, "Read4", /*hp_tag=*/2);
+  read_4.set_read_number(1);
+
+  DeepVariantCall_SupportingReads dv_supporting_reads_1 =
+      DeepVariantCall_SupportingReads::default_instance();
+  dv_supporting_reads_1.add_read_names("Read1/1");
+  DeepVariantCall_SupportingReads dv_supporting_reads_2 =
+      DeepVariantCall_SupportingReads::default_instance();
+  dv_supporting_reads_2.add_read_names("Read2/1");
+  DeepVariantCall_SupportingReads dv_supporting_reads_3 =
+      DeepVariantCall_SupportingReads::default_instance();
+  dv_supporting_reads_3.add_read_names("Read3/1");
+  DeepVariantCall_SupportingReads dv_supporting_reads_4 =
+      DeepVariantCall_SupportingReads::default_instance();
+  dv_supporting_reads_4.add_read_names("Read4/1");
+
+  DeepVariantCall dv_call = DeepVariantCall::default_instance();
+
+  dv_call.mutable_variant()->mutable_alternate_bases()->Add("GGGCGCATT");
+  // 1-base shorter alt
+  dv_call.mutable_variant()->mutable_alternate_bases()->Add("GGGCGCAT");
+  // 1-base longer alt
+  dv_call.mutable_variant()->mutable_alternate_bases()->Add("GGGCGCATTT");
+  // 2-base shorter alt. This alt allele has different HP tag.
+  dv_call.mutable_variant()->mutable_alternate_bases()->Add("GGGCGCA");
+
+  // Add HP tags to the variant, hp tags are set per alt allele.
+  auto alt_ps_field =
+      (*dv_call.mutable_variant()->mutable_info())["ALT_PS"].add_values();
+  alt_ps_field->set_int_value(1);
+  alt_ps_field =
+      (*dv_call.mutable_variant()->mutable_info())["ALT_PS"].add_values();
+  alt_ps_field->set_int_value(1);
+  alt_ps_field =
+      (*dv_call.mutable_variant()->mutable_info())["ALT_PS"].add_values();
+  alt_ps_field->set_int_value(1);
+  // HP tag is set to 2 for the last allele.
+  alt_ps_field =
+      (*dv_call.mutable_variant()->mutable_info())["ALT_PS"].add_values();
+  alt_ps_field->set_int_value(2);
+
+  dv_call.mutable_allele_support()->insert(
+      google::protobuf::MapPair<std::string, DeepVariantCall_SupportingReads>(
+          "GGGCGCATT", dv_supporting_reads_1));
+  dv_call.mutable_allele_support()->insert(
+      google::protobuf::MapPair<std::string, DeepVariantCall_SupportingReads>(
+          "GGGCGCAT", dv_supporting_reads_2));
+  dv_call.mutable_allele_support()->insert(
+      google::protobuf::MapPair<std::string, DeepVariantCall_SupportingReads>(
+          "GGGCGCATTT", dv_supporting_reads_3));
+  dv_call.mutable_allele_support()->insert(
+      google::protobuf::MapPair<std::string, DeepVariantCall_SupportingReads>(
+          "GGGCGCA", dv_supporting_reads_4));
+
+  // Creating pileup with 1 alt allele.
+  std::vector<std::string> alt_alleles = {"GGGCGCATT"};
+
+  // Read1 supports the alt allele in the pileup.
+  std::uint8_t rsa = channel.ReadSupportsAlt(dv_call, read_1, alt_alleles);
+  EXPECT_EQ(rsa, 1);
+  // Read2 fuzzy supports the alt allele in the pileup.
+  rsa = channel.ReadSupportsAlt(dv_call, read_2, alt_alleles);
+  EXPECT_EQ(rsa, 10);
+  // Read3 fuzzy supports the alt allele in the pileup.
+  rsa = channel.ReadSupportsAlt(dv_call, read_3, alt_alleles);
+  EXPECT_EQ(rsa, 10);
+  // Read4 fuzzy supports the alt allele in the pileup but has different HP tag.
+  rsa = channel.ReadSupportsAlt(dv_call, read_4, alt_alleles);
+  EXPECT_EQ(rsa, 0);
 }
 
 TEST(MatchesRefColor, BaseMatch) {
@@ -472,6 +606,86 @@ TEST(ReadInsertSizeTest, NoValue) {
   EXPECT_EQ(w_insert_size, expected);
 }
 
+TEST(SupplementaryAlignmentChannelTest, ReadIsSupplementary) {
+  PileupImageOptions options;
+  options.set_allele_unsupporting_read_alpha(0.0);
+  options.set_allele_supporting_read_alpha(1.0);
+  SupplementaryAlignmentChannel channel(/*width=*/1, options);
+  std::vector<unsigned char> data(1);
+  Read read = nucleus::MakeRead("chr1", 1, "A", {"1M"});
+  read.set_supplementary_alignment(true);
+  channel.FillReadBase(data, 0, 'A', 'A', 0, read, 0,
+                       DeepVariantCall::default_instance(), {});
+  EXPECT_EQ(data[0], 254);
+}
+
+TEST(SupplementaryAlignmentChannelTest, ReadIsNotSupplementary) {
+  PileupImageOptions options;
+  options.set_allele_unsupporting_read_alpha(0.0);
+  options.set_allele_supporting_read_alpha(1.0);
+  SupplementaryAlignmentChannel channel(/*width=*/1, options);
+  std::vector<unsigned char> data(1);
+  Read read = nucleus::MakeRead("chr1", 1, "A", {"1M"});
+  read.set_supplementary_alignment(false);
+  channel.FillReadBase(data, 0, 'A', 'A', 0, read, 0,
+                       DeepVariantCall::default_instance(), {});
+  EXPECT_EQ(data[0], 0);
+}
+
+TEST(AlleleSampleProbabilityChannelTest, ReadSupportsAlt) {
+  PileupImageOptions options;
+  AlleleSampleProbabilityChannel channel(/*width=*/1, options);
+  std::vector<unsigned char> data(1);
+  Read read = nucleus::MakeRead("chr1", 1, "A", {"1M"}, "read1");
+
+  DeepVariantCall dv_call;
+  (*dv_call.mutable_allele_support())["A"].add_read_names("read1/0");
+  (*dv_call.mutable_allele_support())["A"].add_read_names("read2/0");
+  dv_call.add_ref_support("read3/0");
+
+  channel.FillReadBase(data, 0, 'A', 'A', 0, read, 0, dv_call, {});
+  // 2 reads support alt "A", 1 read supports ref. Total reads = 3.
+  // The read "read1" supports alt "A", which has 2 supporting reads.
+  // So, the value should be sqrt(2/3) * 254 = 207.
+  EXPECT_EQ(data[0], 207);
+}
+
+TEST(AlleleSampleProbabilityChannelTest, ReadSupportsRef) {
+  PileupImageOptions options;
+  AlleleSampleProbabilityChannel channel(/*width=*/1, options);
+  std::vector<unsigned char> data(1);
+  Read read = nucleus::MakeRead("chr1", 1, "A", {"1M"}, "read3");
+
+  DeepVariantCall dv_call;
+  (*dv_call.mutable_allele_support())["A"].add_read_names("read1/0");
+  (*dv_call.mutable_allele_support())["A"].add_read_names("read2/0");
+  dv_call.add_ref_support("read3/0");
+
+  channel.FillReadBase(data, 0, 'A', 'A', 0, read, 0, dv_call, {});
+  // 2 reads support alt "A", 1 read supports ref. Total reads = 3.
+  // The read "read3" supports the ref, which has 1 supporting read.
+  // So, the value should be sqrt(1/3) * 254 = 146.
+  EXPECT_EQ(data[0], 146);
+}
+
+TEST(AlleleSampleProbabilityChannelTest, NoSupportingReads) {
+  PileupImageOptions options;
+  AlleleSampleProbabilityChannel channel(/*width=*/1, options);
+  std::vector<unsigned char> data(1);
+  Read read = nucleus::MakeRead("chr1", 1, "A", {"1M"}, "read4");
+
+  DeepVariantCall dv_call;
+  (*dv_call.mutable_allele_support())["A"].add_read_names("read1/0");
+  (*dv_call.mutable_allele_support())["A"].add_read_names("read2/0");
+  dv_call.add_ref_support("read3/0");
+
+  channel.FillReadBase(data, 0, 'A', 'A', 0, read, 0, dv_call, {});
+  // The read "read4" is not in the list of supporting reads.
+  // The current implementation defaults to ref support, which is 1.
+  // So, the value should be sqrt(1/3) * 254 = 146.
+  EXPECT_EQ(data[0], 146);
+}
+
 struct GetChannelDataTestData {
   absl::flat_hash_set<DeepVariantChannelEnum> channels_enum_to_blank;
 };
@@ -509,6 +723,7 @@ TEST_P(GetChannelDataTest, ReadData) {
       DeepVariantChannelEnum::CH_HOMOPOLYMER_WEIGHTED,
       DeepVariantChannelEnum::CH_BLANK,
       DeepVariantChannelEnum::CH_INSERT_SIZE,
+      DeepVariantChannelEnum::CH_SUPPLEMENTARY_ALIGNMENT,
   };
 
   Read ref_read = nucleus::MakeRead("chr1", 1, "GGGCGCTTTTAT", {"11M"});
@@ -726,7 +941,6 @@ TEST(GetRefChannelDataTest, ReadData) {
                 DeepVariantChannelEnum::CH_BLANK))[0],
             0);
 }
-
 
 }  // namespace deepvariant
 }  // namespace genomics

@@ -196,6 +196,17 @@ _SAMPLE_NAME_PANGENOME = flags.DEFINE_string(
         'The default here is corresponding to the default for --pangenome.'
     ),
 )
+_REF_NAME_PANGENOME = flags.DEFINE_string(
+    'ref_name_pangenome',
+    'GRCh38',
+    (
+        'The name of the reference genome in the pangenome gbz file.'
+        'This reference should match the reference used for the reads. This'
+        'flag is added since the exact name assigned to the pangenome reference'
+        'can be different from the name of the reference fasta used for '
+        'the reads.'
+    ),
+)
 _MAKE_EXAMPLES_EXTRA_ARGS = flags.DEFINE_string(
     'make_examples_extra_args',
     None,
@@ -285,19 +296,12 @@ class SmallModelConfig:
   indel_gq_threshold: int
   vaf_context_window: int
 
-
-SMALL_MODEL_CONFIG_BY_MODEL_TYPE = {
-    ModelType.WGS: SmallModelConfig(
-        small_model_checkpoint='/opt/smallmodels/wgs',
-        snp_gq_threshold=25,
-        indel_gq_threshold=30,
-        vaf_context_window=51,
-    ),
-}
+# Currently, we do not have default PG-aware small models.
+SMALL_MODEL_CONFIG_BY_MODEL_TYPE = {}
 
 # Current release version of DeepVariant.
 # Should be the same in dv_vcf_constants.py.
-DEEP_VARIANT_VERSION = '1.9.0'
+DEEP_VARIANT_VERSION = '1.10.0'
 
 
 def _is_quoted(value):
@@ -401,6 +405,8 @@ def _set_small_model_config(
 
 def load_gbz_into_shared_memory_command(
     gbz: str,
+    *,
+    ref_name_pangenome: str,
     gbz_shared_memory_name: str | None,
     gbz_shared_memory_size_gb: int,
 ) -> tuple[str, Optional[str]]:
@@ -408,6 +414,7 @@ def load_gbz_into_shared_memory_command(
 
   Args:
     gbz: Input pangenome GBZ file(s).
+    ref_name_pangenome: Reference name to use for the GBZ file.
     gbz_shared_memory_name: Name of the shared memory region to create.
     gbz_shared_memory_size_gb: Size of the shared memory region to create.
 
@@ -416,6 +423,7 @@ def load_gbz_into_shared_memory_command(
   """
   command = ['time', '/opt/deepvariant/bin/load_gbz_into_shared_memory']
   command.extend(['--pangenome_gbz', '"{}"'.format(gbz)])
+  command.extend(['--ref_name_pangenome', '"{}"'.format(ref_name_pangenome)])
   if gbz_shared_memory_name is not None:
     command.extend(
         ['--shared_memory_name', '"{}"'.format(gbz_shared_memory_name)]
@@ -475,23 +483,9 @@ def make_examples_pangenome_aware_dv_command(
 
   special_args = {}
   model_type = ModelType(_MODEL_TYPE.value)
-  if model_type == ModelType.WGS:
-    # Specific flags that are not default can be added here.
-    special_args['keep_only_window_spanning_haplotypes'] = True
-    special_args['keep_supplementary_alignments'] = True
-    special_args['sort_by_haplotypes'] = True
-    special_args['min_mapping_quality'] = 0
-    special_args['keep_legacy_allele_counter_behavior'] = True
-    special_args['normalize_reads'] = True
-    special_args['trim_reads_for_pileup'] = True
-  elif model_type == ModelType.WES:
-    special_args['keep_only_window_spanning_haplotypes'] = True
-    special_args['keep_supplementary_alignments'] = True
-    special_args['sort_by_haplotypes'] = True
-    special_args['trim_reads_for_pileup'] = True
-  else:
-    raise ValueError('Invalid model_type: %s' % _MODEL_TYPE.value)
-
+  # Starting from v1.10.0, the args for make_examples in calling mode are
+  # defined in the model.example_info.json file corresponding to each model
+  # type.
   _set_small_model_config(
       special_args, model_type, _CUSTOMIZED_SMALL_MODEL.value
   )
@@ -645,25 +639,24 @@ def check_or_create_intermediate_results_dir(
 def check_flags():
   """Additional logic to make sure flags are set appropriately."""
   if _CUSTOMIZED_MODEL.value is not None:
-    if not tf.io.gfile.exists(
-        _CUSTOMIZED_MODEL.value + '.data-00000-of-00001'
-    ) or not tf.io.gfile.exists(_CUSTOMIZED_MODEL.value + '.index'):
-      raise RuntimeError(
-          'The model files {}* do not exist. Potentially '
-          'relevant issue: '
-          'https://github.com/google/deepvariant/blob/r1.9/docs/'
-          'FAQ.md#why-cant-it-find-one-of-the-input-files-eg-'
-          'could-not-open'.format(_CUSTOMIZED_MODEL.value)
-      )
     logging.info(
-        (
-            'You set --customized_model. Instead of using the default '
-            'model for %s, `call_variants` step will load %s* '
-            'instead.'
-        ),
-        _MODEL_TYPE.value,
+        'Loading from customized model %s and model type is %s',
         _CUSTOMIZED_MODEL.value,
+        _MODEL_TYPE.value,
     )
+    if tf.io.gfile.isdir(_CUSTOMIZED_MODEL.value):
+      model_dir = _CUSTOMIZED_MODEL.value
+    else:
+      model_dir = os.path.dirname(_CUSTOMIZED_MODEL.value)
+    if not tf.io.gfile.exists(f'{model_dir}/model.example_info.json'):
+      raise RuntimeError(
+          'Unable to find model.example_info.json in the model directory:'
+          ' Starting from v1.10.0, the model file needs to have a'
+          ' corresponding model.example_info.json file. You can see'
+          f' gs://deepvariant/models/DeepVariant/{DEEP_VARIANT_VERSION}/savedmodels/deepvariant.*.savedmodel/model.example_info.json'
+          ' as examples. The best way is to consult the people who trained the'
+          ' model to understand what flags should be used for make_examples.'
+      )
   if _CUSTOMIZED_SMALL_MODEL.value is not None:
     logging.info(
         (
@@ -736,6 +729,7 @@ def create_all_commands_and_logfiles(
     commands.append(
         load_gbz_into_shared_memory_command(
             gbz=_PANGENOME.value,
+            ref_name_pangenome=_REF_NAME_PANGENOME.value,
             gbz_shared_memory_name=_GBZ_SHARED_MEMORY_NAME.value,
             gbz_shared_memory_size_gb=_GBZ_SHARED_MEMORY_SIZE_GB.value,
         )
@@ -756,6 +750,7 @@ def create_all_commands_and_logfiles(
           sample_name_reads=_SAMPLE_NAME_READS.value,
           sample_name_pangenome=_SAMPLE_NAME_PANGENOME.value,
           gbz_shared_memory_name=_GBZ_SHARED_MEMORY_NAME.value,
+          ref_name_pangenome=_REF_NAME_PANGENOME.value,
       )
   )
 
@@ -819,6 +814,7 @@ def main(_):
       'ref',
       'reads',
       'output_vcf',
+      'pangenome',
   ]:
     if FLAGS.get_flag_value(flag_key, None) is None:
       sys.stderr.write('--{} is required.\n'.format(flag_key))
@@ -862,11 +858,4 @@ def main(_):
 
 
 if __name__ == '__main__':
-  flags.mark_flags_as_required([
-      'model_type',
-      'output_vcf',
-      'pangenome',
-      'reads',
-      'ref',
-  ])
   app.run(main)

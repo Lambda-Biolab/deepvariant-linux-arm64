@@ -151,6 +151,140 @@ class MakeExamplesCoreUnitTest(parameterized.TestCase):
           deepvariant_pb2.MakeExamplesOptions.Mode, 'foo'
       )
 
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_with_empty_example_info_file(self):
+    example_info_file = self.create_tempfile(
+        file_path='model.example_info.json', content='{}'
+    )
+    FLAGS.mode = 'calling'
+    FLAGS.checkpoint = example_info_file.full_path
+
+    with self.assertLogs() as logs:
+      make_examples_core.apply_flags_for_calling(FLAGS)
+
+    self.assertEqual(
+        logs.records[0].message,
+        'model.example_info filename: %s' % example_info_file.full_path,
+    )
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_with_examples_info_flag(self):
+    example_info_file = self.create_tempfile(
+        file_path='model.example_info.json',
+        content='{"flags_for_calling": {"pileup_image_height": 100}}',
+    )
+    FLAGS.mode = 'calling'
+    FLAGS.checkpoint = example_info_file.full_path
+
+    make_examples_core.apply_flags_for_calling(FLAGS)
+
+    self.assertEqual(FLAGS.pileup_image_height, 100)
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_with_non_existing_flag(self):
+    example_info_file = self.create_tempfile(
+        file_path='model.example_info.json',
+        content='{"flags_for_calling": {"foo": "bar"}}',
+    )
+    FLAGS.mode = 'calling'
+    FLAGS.checkpoint = example_info_file.full_path
+
+    with self.assertRaises(SystemExit) as se:
+      make_examples_core.apply_flags_for_calling(FLAGS)
+
+    self.assertEqual(se.exception.code, 1)
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_with_command_line_flag(self):
+    example_info_file = self.create_tempfile(
+        file_path='model.example_info.json',
+        content='{"flags_for_calling": {"pileup_image_height": "100"}}',
+    )
+    FLAGS.mode = 'calling'
+    FLAGS.checkpoint = example_info_file.full_path
+    FLAGS.pileup_image_height = 200
+    FLAGS['pileup_image_height'].present = True
+
+    make_examples_core.apply_flags_for_calling(FLAGS)
+
+    self.assertEqual(FLAGS.pileup_image_height, 200)
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_partition_flags_both_set(self):
+    FLAGS.mode = 'calling'
+    FLAGS.partition_size = 1000
+    FLAGS['partition_size'].present = True
+    FLAGS.max_reads_per_partition = 200
+    FLAGS['max_reads_per_partition'].present = True
+    # This should not raise an error.
+    make_examples_core.apply_flags_for_calling(FLAGS)
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_partition_flags_neither_set(self):
+    FLAGS.mode = 'calling'
+    # This should not raise an error.
+    make_examples_core.apply_flags_for_calling(FLAGS)
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_partition_flags_only_partition_size(self):
+    FLAGS.mode = 'calling'
+    FLAGS.partition_size = 1000
+    FLAGS['partition_size'].present = True
+    with self.assertRaisesRegex(
+        ValueError,
+        'Both --partition_size and --max_reads_per_partition must be set '
+        'together, or not at all.',
+    ):
+      make_examples_core.apply_flags_for_calling(FLAGS)
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_calling_partition_flags_only_max_reads(self):
+    FLAGS.mode = 'calling'
+    FLAGS.max_reads_per_partition = 200
+    FLAGS['max_reads_per_partition'].present = True
+    with self.assertRaisesRegex(
+        ValueError,
+        'Both --partition_size and --max_reads_per_partition must be set '
+        'together, or not at all.',
+    ):
+      make_examples_core.apply_flags_for_calling(FLAGS)
+
+  def test_no_example_info_json_path_with_saved_model(self):
+    with self.assertRaises(ValueError):
+      make_examples_core.get_model_example_info_json_path('')
+
+  def test_example_info_json_path_with_json_arg(self):
+    model_example_info_json_path = (
+        make_examples_core.get_model_example_info_json_path(
+            'ignored', 'expected_json_file'
+        )
+    )
+    self.assertEqual(model_example_info_json_path, 'expected_json_file')
+
+  def test_old_example_info_json_path_with_saved_model(self):
+    example_info_file = self.create_tempfile(file_path='example_info.json')
+    checkpoint = example_info_file.full_path
+    with self.assertLogs() as logs:
+      model_example_info_json_path = (
+          make_examples_core.get_model_example_info_json_path(checkpoint)
+      )
+    self.assertEqual(model_example_info_json_path, example_info_file.full_path)
+    self.assertEqual(
+        logs.records[0].message,
+        'model.example_info.json not found in %s. Fallback to an'
+        ' example_info.json file in the same directory.' % checkpoint,
+    )
+
+  def test_model_example_info_json_path_with_saved_model(self):
+    example_info_file = self.create_tempfile(
+        file_path='model.example_info.json'
+    )
+    checkpoint = example_info_file.full_path
+    model_example_info_json_path = (
+        make_examples_core.get_model_example_info_json_path(checkpoint)
+    )
+    self.assertEqual(model_example_info_json_path, example_info_file.full_path)
+
   def test_extract_sample_name_from_reads_single_sample(self):
     mock_sample_reader = mock.Mock()
     mock_sample_reader.header = reads_pb2.SamHeader(
@@ -926,6 +1060,304 @@ class MakeExamplesCoreUnitTest(parameterized.TestCase):
       make_examples_core.processing_regions_from_options(options)
 
 
+class ShouldFilterLowVafTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.options = deepvariant_pb2.MakeExamplesOptions(
+        reference_filename=testdata.CHR20_FASTA,
+        filter_low_vaf_candidates=True,
+        low_vaf_threshold=0.1,
+        low_vaf_max_base_quality=20,
+        low_vaf_max_mapping_quality=30,
+    )
+    self.processor = make_examples_core.RegionProcessor(self.options)
+    self.target_sample_name = 'test_sample'
+
+  def _create_candidate(
+      self,
+      ref_reads,
+      alt_reads_list,  # list of lists, one for each alt allele
+      alt_alleles=None,
+  ):
+    if alt_alleles is None:
+      alt_alleles = ['T']
+    candidate = deepvariant_pb2.DeepVariantCall()
+    candidate.variant.alternate_bases.extend(alt_alleles)
+    for read_info in ref_reads:
+      candidate.ref_support_ext.read_infos.add(**read_info)
+    for i, alt_allele in enumerate(alt_alleles):
+      for read_info in alt_reads_list[i]:
+        candidate.allele_support_ext[alt_allele].read_infos.add(**read_info)
+    return candidate
+
+  def test_filter_disabled(self):
+    self.options.filter_low_vaf_candidates = False
+    candidate = self._create_candidate(
+        ref_reads=[],
+        alt_reads_list=[[]],
+    )
+    self.assertFalse(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_no_target_alt_reads_filtered(self):
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}],
+        alt_reads_list=[[]],
+    )
+    self.assertTrue(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_dp_zero_filtered(self):
+    candidate = self._create_candidate(
+        ref_reads=[],
+        alt_reads_list=[[{'sample_name': 'other_sample'}]],
+    )
+    # Target alt reads and ref reads are empty, so DP=0 for target.
+    # But first check is for empty target_alt_reads, which is True here.
+    self.assertTrue(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+    candidate2 = self._create_candidate(
+        ref_reads=[],
+        alt_reads_list=[[]],
+    )
+    candidate2.allele_support_ext['T'].read_infos.add(sample_name='other')
+    self.assertTrue(
+        self.processor._should_filter_low_vaf(
+            candidate2, self.target_sample_name
+        )
+    )
+
+  def test_vaf_above_threshold_not_filtered(self):
+    # 1 alt, 1 ref => vaf = 0.5 > 0.1, not filtered.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}],
+        alt_reads_list=[[{
+            'sample_name': self.target_sample_name,
+            'average_base_quality': 30,
+            'mapping_quality': 40,
+        }]],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.assertFalse(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_vaf_below_threshold_low_bq_filtered(self):
+    # 1 alt / (9 ref + 1 alt) = 0.1. vaf <= 0.1.
+    # avg_bq = 10 < 20, so filter.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 9,
+        alt_reads_list=[[{
+            'sample_name': self.target_sample_name,
+            'average_base_quality': 10,
+            'mapping_quality': 40,
+        }]],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.assertTrue(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_vaf_below_threshold_low_mapq_filtered(self):
+    # 1 alt / (9 ref + 1 alt) = 0.1. vaf <= 0.1.
+    # avg_bq = 30 >= 20.
+    # avg_mapq = 10 < 30, so filter.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 9,
+        alt_reads_list=[[{
+            'sample_name': self.target_sample_name,
+            'average_base_quality': 30,
+            'mapping_quality': 10,
+        }]],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.options.low_vaf_max_mapping_quality = 30
+    self.assertTrue(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_vaf_below_threshold_not_filtered(self):
+    # 2 alt / (8 ref + 2 alt) = 0.2. vaf > 0.1
+    # Expect not filtered.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 8,
+        alt_reads_list=[
+            [
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 30,
+                    'mapping_quality': 40,
+                },
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 30,
+                    'mapping_quality': 40,
+                },
+            ],
+        ],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.options.low_vaf_max_mapping_quality = 30
+    self.assertFalse(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_vaf_below_threshold_low_signal_not_filtered(self):
+    # 2 target alt / (18 ref + 2 target alt) = 0.1 <= 0.1.
+    # avg_bq = 25 >= 20.
+    # avg_mapq = 35 >= 30.
+    # fwd_support=1, rev_support=1. min_reads_per_strand=1.
+    # => not filtered.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 18,
+        alt_reads_list=[
+            [
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 25,
+                    'mapping_quality': 35,
+                },
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 25,
+                    'mapping_quality': 35,
+                },
+            ],
+        ],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.options.low_vaf_max_mapping_quality = 30
+    self.assertFalse(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_multiallelic_one_allele_high_vaf_not_filtered(self):
+    # Allele 1: 2 reads, VAF = 2/(2+8)=0.2 > 0.1, valid.
+    # Allele 2: 1 read, VAF = 1/(1+8)=0.11 > 0.1, valid.
+    # If any allele has vaf > threshold, we don't filter.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 8,
+        alt_alleles=['A', 'C'],
+        alt_reads_list=[
+            [
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 30,
+                    'mapping_quality': 40,
+                },
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 30,
+                    'mapping_quality': 40,
+                },
+            ],
+            [{
+                'sample_name': self.target_sample_name,
+                'average_base_quality': 10,
+                'mapping_quality': 10,
+            }],
+        ],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.options.low_vaf_max_mapping_quality = 30
+    self.assertFalse(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_multiallelic_one_allele_good_quality_not_filtered(self):
+    # Allele 1: 2 reads, VAF=2/(2+18)=0.1<=0.1. BQ=25>=20, MAPQ=35>=30. Valid.
+    # Allele 2: 1 read, VAF=1/(1+18)=0.05<=0.1. BQ=10<20. Invalid.
+    # Allele 1 is valid by quality, so we should not filter.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 18,
+        alt_alleles=['A', 'C'],
+        alt_reads_list=[
+            [
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 25,
+                    'mapping_quality': 35,
+                },
+                {
+                    'sample_name': self.target_sample_name,
+                    'average_base_quality': 25,
+                    'mapping_quality': 35,
+                },
+            ],
+            [{
+                'sample_name': self.target_sample_name,
+                'average_base_quality': 10,
+                'mapping_quality': 10,
+            }],
+        ],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.options.low_vaf_max_mapping_quality = 30
+    self.assertFalse(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+  def test_multiallelic_all_alleles_fail_filtered(self):
+    # Allele 1: 1 read, VAF=1/(1+9)=0.1<=0.1. BQ=10<20. Invalid.
+    # Allele 2: 1 read, VAF=1/(1+9)=0.1<=0.1. MAPQ=10<30. Invalid.
+    # All alleles are invalid, we should filter.
+    candidate = self._create_candidate(
+        ref_reads=[{'sample_name': self.target_sample_name}] * 9,
+        alt_alleles=['A', 'C'],
+        alt_reads_list=[
+            [{
+                'sample_name': self.target_sample_name,
+                'average_base_quality': 10,
+                'mapping_quality': 40,
+            }],
+            [{
+                'sample_name': self.target_sample_name,
+                'average_base_quality': 30,
+                'mapping_quality': 10,
+            }],
+        ],
+    )
+    self.options.low_vaf_threshold = 0.1
+    self.options.low_vaf_max_base_quality = 20
+    self.options.low_vaf_max_mapping_quality = 30
+    self.assertTrue(
+        self.processor._should_filter_low_vaf(
+            candidate, self.target_sample_name
+        )
+    )
+
+
 class RegionProcessorTest(parameterized.TestCase):
 
   def setUp(self):
@@ -981,7 +1413,7 @@ class RegionProcessorTest(parameterized.TestCase):
             0,
         ),
     )
-    self.processor.process(self.region)
+    self.processor.process(self.region, n_stats={'n_filtered_low_vaf': 0})
     test_utils.assert_called_once_workaround(self.mock_init)
     mock_rrna.assert_called_once_with(
         region=self.region,
@@ -1006,7 +1438,7 @@ class RegionProcessorTest(parameterized.TestCase):
             0,
         ),
     )
-    self.processor.process(self.region)
+    self.processor.process(self.region, n_stats={'n_filtered_low_vaf': 0})
     test_utils.assert_not_called_workaround(self.mock_init)
     mock_rrna.assert_called_once_with(
         region=self.region,
@@ -1029,8 +1461,9 @@ class RegionProcessorTest(parameterized.TestCase):
             0,
         ),
     )
+    n_stats = {'n_filtered_low_vaf': 0}
     candidates, gvcfs, runtimes, read_phases, phased_reads_count = (
-        self.processor.process(self.region)
+        self.processor.process(self.region, n_stats=n_stats)
     )
     self.assertEmpty(candidates['main_sample'])
     self.assertEmpty(gvcfs['main_sample'])
@@ -1066,8 +1499,9 @@ class RegionProcessorTest(parameterized.TestCase):
             0,
         ),
     )
+    n_stats = {'n_filtered_low_vaf': 0}
     candidates, gvcfs, runtimes, read_phases, phased_reads_count = (
-        self.processor.process(self.region)
+        self.processor.process(self.region, n_stats=n_stats)
     )
     self.assertEqual(candidates['main_sample'], [mock_candidate])
     self.assertEmpty(gvcfs['main_sample'])
@@ -1103,8 +1537,9 @@ class RegionProcessorTest(parameterized.TestCase):
             0,
         ),
     )
+    n_stats = {'n_filtered_low_vaf': 0}
     candidates, gvcfs, runtimes, read_phases, phased_reads_count = (
-        self.processor.process(self.region)
+        self.processor.process(self.region, n_stats=n_stats)
     )
     self.assertEqual(candidates['main_sample'], [c1, c2])
     self.assertEmpty(gvcfs['main_sample'])
@@ -1138,9 +1573,9 @@ class RegionProcessorTest(parameterized.TestCase):
             2,
         ),
     )
-
+    n_stats = {'n_filtered_low_vaf': 0}
     candidates, gvcfs, runtimes, read_phases, phased_reads_count = (
-        self.processor.process(self.region)
+        self.processor.process(self.region, n_stats=n_stats)
     )
     self.assertEqual(candidates['main_sample'], [c1, c2])
     self.assertEmpty(gvcfs['main_sample'])
@@ -1250,6 +1685,7 @@ class RegionProcessorTest(parameterized.TestCase):
     mock_vc.calls_and_gvcfs.assert_called_once_with(
         allele_counters={'sample_id': mock_ac},
         target_sample='sample_id',
+        target_role='main_sample',
         include_gvcfs=include_gvcfs,
         include_med_dp=include_med_dp,
         left_padding=0,
@@ -1388,6 +1824,86 @@ class RegionProcessorTest(parameterized.TestCase):
         '\n'.join(logs.output),
         expected_log_message,
     )
+
+  @parameterized.parameters(
+      dict(output_format='tsv'),
+      dict(output_format='bam'),
+  )
+  @flagsaver.flagsaver
+  def test_output_local_read_phasing(self, output_format):
+    FLAGS.mode = 'calling'
+    FLAGS.ref = testdata.CHR20_FASTA
+    FLAGS.reads = testdata.CHR20_BAM
+    FLAGS.regions = 'chr20:10006000-10007612'
+    FLAGS.examples = self.create_tempfile('examples.tfrecord.gz').full_path
+    FLAGS.channel_list = ','.join(dv_constants.PILEUP_DEFAULT_CHANNELS)
+    FLAGS.output_local_read_phasing = self.create_tempfile(
+        'read_phasing.{}'.format(output_format)
+    ).full_path
+    options = make_examples.default_options(add_flags=True)
+    make_examples_core.make_examples_runner(options)
+
+    if output_format == 'tsv':
+      # Check that tsv file exists
+      with open(FLAGS.output_local_read_phasing, 'r') as f:
+        read_phasing = f.readlines()
+      self.assertNotEmpty(read_phasing)
+    elif output_format == 'bam':
+      # Check that bam file exists
+      with open(FLAGS.output_local_read_phasing, 'rb') as f:
+        read_phasing = f.read()
+      self.assertNotEmpty(read_phasing)
+
+  def test_assign_phase_from_normal(self):
+    processor = make_examples_core.RegionProcessor(self.options)
+    processor.direct_phasing_cpp = mock.Mock()
+
+    # Mock phased variants from the "normal" sample
+    processor.direct_phasing_cpp.get_phased_variants.return_value = []
+    for i in range(0, 4):
+      mock_phased_variant = mock.Mock()
+      mock_phased_variant.position = i * 100
+      mock_phased_variant.phase_1_bases = 'A'
+      mock_phased_variant.phase_2_bases = 'C'
+      processor.direct_phasing_cpp.get_phased_variants.return_value.append(
+          mock_phased_variant
+      )
+
+    # Mock tumor candidates
+    tumor_candidates = []
+    for i in range(0, 4):
+      mock_candidate = mock.Mock()
+      mock_candidate.variant.start = i * 100
+      mock_candidate.ref_support = ['read8/1']
+      mock_candidate.allele_support = {
+          'A': mock.Mock(
+              read_names=[
+                  'read1/1',
+                  'read2/1',
+                  'read3/1',
+                  'read4/1',
+                  'read5/1',
+                  'read6/1',
+              ]
+          ),
+          'C': mock.Mock(read_names=['read7/1']),
+      }
+      tumor_candidates.append(mock_candidate)
+
+    # Mock tumor reads
+    tumor_reads_to_phase = []
+    for i in range(1, 9):
+      read = mock.Mock()
+      read.fragment_name = f'read{i}'
+      read.read_number = 1
+      tumor_reads_to_phase.append(read)
+
+    read_phases = processor.assign_phase_from_normal(
+        tumor_candidates, tumor_reads_to_phase
+    )
+
+    expected_phases = [1, 1, 1, 1, 1, 1, 2, 0]
+    self.assertEqual(read_phases, expected_phases)
 
 
 if __name__ == '__main__':

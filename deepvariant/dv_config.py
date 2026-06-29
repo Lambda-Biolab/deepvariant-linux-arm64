@@ -194,6 +194,38 @@ def get_hybrid_config(config: ml_collections.ConfigDict):
   config.use_mixed_precision = False
 
 
+def get_rnaseq_config(config: ml_collections.ConfigDict):
+  """Config parameters for rnaseq training."""
+  get_wgs_config(config)
+  config.train_dataset_pbtxt = '/path/to/your/train.dataset_config.pbtxt'
+  config.tune_dataset_pbtxt = '/path/to/your/tune.dataset_config.pbtxt'
+  config.init_checkpoint = '/path/to/warmstart/checkpoint'
+  config.num_validation_examples = 150_000
+  config.batch_size = (
+      8192  # Use a smaller batch size because we are fine-tuning.
+  )
+  config.learning_rate = 0.0001
+  config.learning_rate_num_epochs_per_decay = 3
+  config.num_epochs = 5
+  config.log_every_steps = 512
+  config.tune_every_steps = 2048
+  config.best_checkpoint_metric = 'tune/f1_weighted'
+  # Optimizer hparams
+  config.optimizer = 'sgd'
+  config.momentum = 0.9
+  config.use_ema = True
+  config.ema_momentum = 0.99
+  config.optimizer_weight_decay = 0.0001
+
+  config.learning_rate = 0.00001
+  config.learning_rate_decay_rate = 0.9999
+  config.warmup_steps = 0
+  config.weight_decay = 0.0001
+
+  config.label_smoothing = 0.01
+  config.backbone_dropout_rate = 0.2
+
+
 # ====================================#
 # Pangenome-aware DeepVariant Configs #
 # ====================================#
@@ -220,31 +252,58 @@ def get_deepsomatic_wgs_config(config: ml_collections.ConfigDict):
   config.beta_2 = 0.9665259112630292
   config.ema_momentum = 0.991463134331829
   config.label_smoothing = 0.000001
-  config.early_stopping_patience = 100
+  config.early_stopping_patience = 10
   config.optimizer = 'adam'
   config.warmup_steps = 1000
   config.weight_decay = 0.00004
+  config.use_mixed_precision = True
   config.learning_rate = 0.00009483389877395854
   config.learning_rate_decay_rate = 0.5
   config.warmup_steps = 10000
   config.num_epochs = 10
   config.train_dataset_pbtxt = '/path/to/your/train.dataset_config.pbtxt'
   config.tune_dataset_pbtxt = '/path/to/your/tune.dataset_config.pbtxt'
-  config.init_checkpoint = '/path/to/warmstart/checkpoint'
 
 
-def get_deepsomatic_wes_config(
+def get_deepsomatic_wes_tumor_only_config(
     config: ml_collections.ConfigDict,
 ):
-  """Config parameters for wgs training."""
+  """Config parameters for WES_TUMOR_ONLY training."""
   get_wgs_config(config)
   config.best_checkpoint_metric = 'tune/f1_homalt'
   # Exome Dataset
   config.train_dataset_pbtxt = '/path/to/your/train.dataset_config.pbtxt'
   config.tune_dataset_pbtxt = '/path/to/your/tune.dataset_config.pbtxt'
   config.init_checkpoint = ''
-  config.num_epochs = 80
+  config.num_epochs = 100
+  config.early_stopping_patience = 50
+  config.class_weights = '1,1,10'
+  config.learning_rate = 0.000009120108596883167
+  config.learning_rate_decay_rate = 0.8799173585418989
+  config.warmup_steps = 7590
+
+
+def get_deepsomatic_wes_config(
+    config: ml_collections.ConfigDict,
+):
+  """Config parameters for DeepSomatic WES training."""
+  # Exome Dataset
+  config.train_dataset_pbtxt = '/path/to/your/train.dataset_config.pbtxt'
+  config.tune_dataset_pbtxt = '/path/to/your/tune.dataset_config.pbtxt'
+  config.init_checkpoint = ''
+  config.adaptive_epsilon = True  # necessary when using adam optimizer
+  config.best_checkpoint_metric = 'tune/f1_homalt'
+  config.beta_1 = 0.9651804083266324  # necessary when using adam optimizer
+  config.beta_2 = 0.9665259112630292  # necessary when using adam optimizer
   config.early_stopping_patience = 10
+  config.ema_momentum = 0.991463134331829
+  config.learning_rate = 0.0013699439419246591
+  config.learning_rate_decay_rate = 0.8311741723269322
+  config.learning_rate_num_epochs_per_decay = 2.25
+  config.num_epochs = 100
+  config.num_validation_examples = 150000
+  config.optimizer = 'adam'
+  config.warmup_steps = 3159
 
 
 def get_deepsomatic_pacbio_tumor_normal_config(
@@ -314,15 +373,17 @@ def get_deepsomatic_wgs_tumor_only_config(config: ml_collections.ConfigDict):
   config.tune_dataset_pbtxt = '/placer/prod/home/brain-genomics/danielecook/deepsomatic/ds_wgs_tumor_only/ds_wgs_tumor_only_tune.dataset_config.pbtxt'
 
 
-# FFPE Configs
 def get_deepsomatic_wgs_ffpe_config(
     config: ml_collections.ConfigDict,
 ):
+  """Config parameters for FFPE_WGS (tumor-normal) training."""
   get_wgs_config(config)
-  config.best_checkpoint_metric = 'tune/f1_homalt'
   config.train_dataset_pbtxt = '/path/to/your/train.dataset_config.pbtxt'
   config.tune_dataset_pbtxt = '/path/to/your/tune.dataset_config.pbtxt'
-  config.init_checkpoint = '/path/to/warmstart/checkpoint'
+  config.init_checkpoint = ''
+  config.best_checkpoint_metric = 'tune/f1_homalt'
+  config.early_stopping_patience = 8
+  config.num_epochs = 22
 
 
 def get_deepsomatic_wes_ffpe_config(
@@ -390,6 +451,7 @@ def get_config(config_name: str) -> ml_collections.ConfigDict:
 
   config.use_ema = True
   config.use_mixed_precision = False
+  config.tpu_casts_images_to_bfloat16 = False
 
   config.denovo_enabled = False
   # class_weights can be specified as a comma-delimited string of weights
@@ -438,6 +500,8 @@ def get_config(config_name: str) -> ml_collections.ConfigDict:
   # Placeholder value for limiting training examples. 0=No limit.
   config.limit = 0
 
+  config.adaptive_epsilon = True
+
   if config_name and '+' in config_name:
     config_name, alt_mode = config_name.split('+')
   else:
@@ -455,6 +519,8 @@ def get_config(config_name: str) -> ml_collections.ConfigDict:
     get_ont_config(config)
   elif config_name == 'hybrid':
     get_hybrid_config(config)
+  elif config_name == 'rnaseq':
+    get_rnaseq_config(config)
   elif config_name == 'pangenome_wgs':
     get_pangenome_wgs_config(config)
   elif config_name == 'deepsomatic_wgs':
@@ -465,6 +531,8 @@ def get_config(config_name: str) -> ml_collections.ConfigDict:
     get_deepsomatic_wgs_tumor_only_config(config)
   elif config_name == 'deepsomatic_wes':
     get_deepsomatic_wes_config(config)
+  elif config_name == 'deepsomatic_wes_tumor_only':
+    get_deepsomatic_wes_tumor_only_config(config)
   elif config_name == 'deepsomatic_wgs_ffpe':
     get_deepsomatic_wgs_ffpe_config(config)
   elif config_name == 'deepsomatic_wes_ffpe':

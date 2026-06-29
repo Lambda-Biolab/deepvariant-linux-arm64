@@ -320,6 +320,7 @@ def train(config: ml_collections.ConfigDict):
       model_input, labels, sample_weight, variant_type = inputs
       sample_weight = tf.cast(sample_weight, tf.float32)
       variant_type = tf.cast(variant_type, tf.float32)
+      model_input = dv_utils.maybe_cast_images_to_bfloat16(model_input, config)
       model_input = dv_utils.preprocess_images(
           model_input,
           channel_indices,
@@ -536,7 +537,8 @@ def train(config: ml_collections.ConfigDict):
   # Training Loop #
   # ============= #
 
-  metric_writer = metric_writers.create_default_writer(logdir=experiment_dir)
+  metric_writer = metric_writers.create_default_writer(
+  )
   metric_writer.write_hparams(config.to_dict())
   report_progress = periodic_actions.ReportProgress(
       num_train_steps=num_train_steps,
@@ -556,19 +558,19 @@ def train(config: ml_collections.ConfigDict):
 
     with metric_writers.ensure_flushes(metric_writer):
 
-      def run_tune(train_step, epoch, steps_per_tune):
+      def run_tune(train_step, epoch, steps_per_tune_run):
         """Runs evaluation on held out eval set."""
         logging.info(
             'Running tune at step=%d epoch=%d',
             train_step,
             epoch,
         )
-        for tune_step in range(0, steps_per_tune, config.steps_per_iter):
+        for tune_step in range(0, steps_per_tune_run, config.steps_per_iter):
           with tf.profiler.experimental.Trace('tune', step_num=tune_step, _r=1):
-            if roundup(tune_step, config.steps_per_iter) > steps_per_tune:
-              steps_per_iter = steps_per_tune % config.steps_per_iter
+            if roundup(tune_step, config.steps_per_iter) > steps_per_tune_run:
+              steps_this_iter = steps_per_tune_run % config.steps_per_iter
             else:
-              steps_per_iter = config.steps_per_iter
+              steps_this_iter = config.steps_per_iter
             if (
                 tune_step
                 % roundup(config.log_every_steps, config.steps_per_iter)
@@ -577,11 +579,12 @@ def train(config: ml_collections.ConfigDict):
               logging.info(
                   'Tune step %s / %s (%s%%)',
                   tune_step,
-                  steps_per_tune,
-                  round(float(tune_step) / float(steps_per_tune), 1) * 100.0,
+                  steps_per_tune_run,
+                  round(float(tune_step) / float(steps_per_tune_run), 1)
+                  * 100.0,
               )
             distributed_tune_step(
-                tune_ds, tf.constant(steps_per_iter, dtype=tf.int64)
+                tune_ds, tf.constant(steps_this_iter, dtype=tf.int64)
             )
 
         metric_writer.write_scalars(

@@ -33,7 +33,7 @@ If you want to compile the DeepVariant binaries for yourself, we also have a
 ### Get Docker image
 
 ```bash
-BIN_VERSION="1.9.0"
+BIN_VERSION="1.10.0"
 
 sudo apt -y update
 sudo apt-get -y install docker.io
@@ -171,9 +171,7 @@ one at a time. `make_examples` and `postprocess_variants` do not run on GPU.
 
 For an example to install GPU driver and docker, see [install_nvidia_docker.sh].
 
-
-
-```
+```bash
 sudo docker run --gpus 1 \
   -v "${INPUT_DIR}":"/input" \
   -v "${OUTPUT_DIR}:/output" \
@@ -195,7 +193,7 @@ singularity run -B /usr/lib/locale/:/usr/lib/locale/ \
   docker://google/deepvariant:"${BIN_VERSION}" \
   /opt/deepvariant/bin/run_deepvariant \
   --model_type=WGS \ **Replace this string with exactly one of the following [WGS,WES,PACBIO,ONT_R104,HYBRID_PACBIO_ILLUMINA]**
-  --vcf_stats_report=true \ 
+  --vcf_stats_report=true \
   --ref="${INPUT_DIR}"/ucsc.hg19.chr20.unittest.fasta \
   --reads="${INPUT_DIR}"/NA12878_S1.chr20.10_10p1mb.bam \
   --regions "chr20:10,000,000-10,010,000" \
@@ -276,9 +274,8 @@ INDEL   PASS            4         4         0           13         0          9 
 [BAM]: http://genome.sph.umich.edu/wiki/BAM
 [BWA]: https://academic.oup.com/bioinformatics/article/25/14/1754/225615/Fast-and-accurate-short-read-alignment-with
 [docker build]: https://docs.docker.com/engine/reference/commandline/build/
-[Dockerfile]: https://github.com/google/deepvariant/blob/r1.9/Dockerfile
+[Dockerfile]: https://github.com/google/deepvariant/blob/r1.10/Dockerfile
 [FASTA]: https://en.wikipedia.org/wiki/FASTA_format
 [Quick Start in r0.7]: https://github.com/google/deepvariant/blob/r0.7/docs/deepvariant-quick-start.md
-[VCF]: https://samtools.github.io/hts-specs/VCFv4.3.pdf
 [run_deepvariant.py]: ../scripts/run_deepvariant.py
 [install_nvidia_docker.sh]: ../scripts/install_nvidia_docker.sh

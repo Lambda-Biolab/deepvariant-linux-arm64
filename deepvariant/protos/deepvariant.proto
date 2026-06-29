@@ -275,6 +275,7 @@ message DeepVariantCall {
     repeated string read_names = 1;
   }
   map<string, SupportingReads> allele_support = 2;
+  map<string, SupportingReads> rejected_allele_support = 10;
   map<string, float> allele_frequency = 3;
 
   // List of Read keys supporting red allele.
@@ -309,6 +310,10 @@ message DeepVariantCall {
   // make_examples will process all alt alleles.
   repeated CallVariantsOutput.AltAlleleIndices
       make_examples_alt_allele_indices = 8;
+
+  // P-value calculated from Wilcoxon Rank-Sum Test between two haplotypes’
+  // methylation values.
+  float methylation_p_value = 9;
 }
 
 // Options to control how our AlleleCounter code works.
@@ -396,7 +401,7 @@ message CallVariantsOutput {
 }
 
 // Options to control how our candidate VariantCaller works.
-// Next ID: 25
+// Next ID: 30
 message VariantCallerOptions {
   // Alleles occurring at least this many times in our AlleleCount are
   // considered candidate variants.
@@ -470,6 +475,19 @@ message VariantCallerOptions {
   repeated string exclude_contigs_for_methylation_phasing = 23;
 
   bool enable_methylation_calling = 24;
+
+  // If True, use read support information from rejected alleles in pileup.
+  bool use_rejected_alleles = 25;
+
+  // If allele indel size is less than or equal to
+  // vsc_small_indel_threshold then vsc_min_indel_fraction_for_small_indels
+  // will be used as allele fraction threshold, otherwise
+  // vsc_min_indel_fraction_for_large_indels will be used.
+  float vsc_min_indel_fraction_for_small_indels = 27;
+  float vsc_min_indel_fraction_for_large_indels = 28;
+  int32 vsc_small_indel_threshold = 29;
+
+  reserved 26;
 }
 
 // Options to control how we label variant calls.
@@ -478,7 +496,7 @@ message VariantLabelerOptions {
 }
 
 // Options to control how we construct pileup images.
-// Next ID: 41.
+// Next ID: 42.
 message PileupImageOptions {
   // The height, in pixels, of the pileup image we'll construct.
   int32 height = 1;
@@ -613,10 +631,14 @@ message PileupImageOptions {
 
   // Deprecated fields.
   int32 sort_by_haplotypes_sample_hp_tag = 35 [deprecated = true];
+
+  // If true, reads will be sorted by the alternate allele they support.
+  // For detailed behavior, see pileup_image_native.cc.
+  bool sort_by_alt_allele_support = 41;
 }
 
 // Options that may differ by sample.
-// Next ID: 21.
+// Next ID: 22.
 message SampleOptions {
   // A string to identify the role of this sample in the analysis, e.g. in
   // trios 'child', 'parent1', or 'parent2'. Importantly, `role` strings should
@@ -696,11 +718,22 @@ message SampleOptions {
   // representing an allele is less than this threshold, the reads are not
   // downsampled.
   int32 non_uniform_downsampling_threshold = 20;
+
+  // Set sample-specific alt-aligned pileup option. If set, overrides the global
+  // setting. Valid options are "none", "single_row" and "rows".
+  string alt_aligned_pileup = 21;
+}
+
+// Options for the direct phasing algorithm.
+message DirectPhasingOptions {
+  // The minimum number of alleles on a read that must support a phase to be
+  // assigned that phase.
+  int32 min_alleles_to_phase = 1;
 }
 
 // High-level options that encapsulates all of the parameters needed to run
 // DeepVariant end-to-end.
-// Next ID: 94.
+// Next ID: 102.
 message MakeExamplesOptions {
   // A list of contig names we never want to call variants on. For example,
   // chrM in humans is the mitocondrial genome and the caller isn't trained to
@@ -833,6 +866,9 @@ message MakeExamplesOptions {
     // The labeling algorithm which labels the variants into customized classes
     // specified in the specified INFO field in the VCF file.
     CUSTOMIZED_CLASSES_LABELER = 3;
+    // The labeling algorithm which combines the positional and haplotype
+    // labelers.
+    COMBINED_LABELER = 4;
   }
   // The labeling algorithm we are using in this DeepVariant run. Only needed
   // when in CALLING mode.
@@ -944,7 +980,8 @@ message MakeExamplesOptions {
   int32 small_model_inference_batch_size = 76;
   // Small model context window size
   int32 small_model_vaf_context_window_size = 77;
-
+  // If true, write out all small model candidates and DV examples.
+  bool small_model_emit_all_candidates = 94;
   // Following 3 attribute are for the fast pipeline.
 
   // Stream examples to shared memory buffer instead of writing them to disk.
@@ -1013,6 +1050,29 @@ message MakeExamplesOptions {
   bool output_debug_info = 90;
 
   reserved 66;
+
+  DirectPhasingOptions direct_phasing_options = 95;
+
+  // If True, in a DeepSomatic run, use phase information from the normal
+  // sample to assign phase to the tumor sample.
+  bool assign_phase_from_normal = 96;
+
+  // If true, use read support information from rejected alleles in pileup.
+  bool use_rejected_alleles = 97;
+
+  // If true, enables filtering of low VAF candidates based on quality
+  // metrics and strand support, provided they have zero support in
+  // non-target samples.
+  bool filter_low_vaf_candidates = 98;
+  // VAF threshold below which the low-VAF filter may be applied (if other
+  // conditions are met).
+  double low_vaf_threshold = 99;
+  // If filtering low VAF candidates, only filter if average base quality
+  // is less than this value.
+  int32 low_vaf_max_base_quality = 100;
+  // If filtering low VAF candidates, only filter if average mapping
+  // quality is less than this value.
+  int32 low_vaf_max_mapping_quality = 101;
 }
 
 // Config describe information needed for a dataset that can be used for
@@ -1223,7 +1283,7 @@ message MakeExamplesRunInfo {
   MakeExamplesStats stats = 4;
 }
 
-// Next ID: 25.
+// Next ID: 31.
 enum DeepVariantChannelEnum {
   // Default should be unspecified.
   CH_UNSPECIFIED = 0;
@@ -1252,6 +1312,11 @@ enum DeepVariantChannelEnum {
   CH_BASE_CHANNELS_ALTERNATE_ALLELE_1 = 20;
   CH_BASE_CHANNELS_ALTERNATE_ALLELE_2 = 21;
 
+  // Read supports variant fuzzy channel (can be used instead of
+  // CH_READ_SUPPORTS_VARIANT). This channel is used to find reads that support
+  // the variant with a fuzzy match.
+  CH_READ_SUPPORTS_VARIANT_FUZZY = 25;
+
   // The following channels correspond to the "Opt Channels" defined in
   // deepvariant/pileup_channel_lib.h:
   CH_READ_MAPPING_PERCENT = 11;
@@ -1266,4 +1331,12 @@ enum DeepVariantChannelEnum {
   CH_MEAN_COVERAGE = 22;
   CH_BASE_METHYLATION = 23;
   CH_BASE_6MA = 24;
+  CH_SUPPLEMENTARY_ALIGNMENT = 26;
+  CH_ALLELE_SAMPLE_PROBABILITY = 27;
+
+  // Homopolymer quality channels that use 'tp' and 't0' tags from reads.
+  // These tags encode quality scores for homopolymer-related errors.
+  CH_HOMOPOLYMER_INSERTION_QUALITY = 28;
+  CH_HOMOPOLYMER_DELETION_QUALITY = 29;
+  CH_INTER_HOMOPOLYMER_INSERTION_QUALITY = 30;
 }

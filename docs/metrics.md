@@ -12,158 +12,88 @@ Memory: 384GiB
 GPUs: 0
 ```
 
-## WGS (Illumina)
+Details of metrics can be found here:
 
-### Runtime
+* [Sample sheet](https://storage.googleapis.com/deepvariant/case-study-outputs/1.10.0/deepvariant_case_study_summaries/sample_sheet.tsv)
+* [Multi QC report](https://storage.googleapis.com/deepvariant/case-study-outputs/1.10.0/deepvariant_case_study_summaries/multiqc_report.html)
+* [Runtime summary report](https://storage.googleapis.com/deepvariant/case-study-outputs/1.10.0/deepvariant_case_study_summaries/runtimes.md)
+* [Accuracy summary report](https://storage.googleapis.com/deepvariant/case-study-outputs/1.10.0/deepvariant_case_study_summaries/happy.summary.md)
 
-Runtime is on HG003 (all chromosomes).
-Reported runtime is an average of 5 runs.
+Sample sheet contains details of the input files used to generate this report.
 
-Stage                            | Time (minutes)
--------------------------------- | ------------------
-make_examples                    |  45m13.77s
-call_variants                    |  16m25.61s
-postprocess_variants (with gVCF) |  6m51.14s
-vcf_stats_report (optional)      |  5m16.42s (optional)
-total                            |  78m57.99s (1h18m57.99s)
+Note: Each model type uses different coverages.
 
-### Accuracy
+## Accuracy
 
-hap.py results on HG003 (all chromosomes, using NIST v4.2.1 truth), which was
-held out while training.
+Below we report full genome accuracy as reported using
+[hap.py](https://github.com/Illumina/hap.py) for our models.
 
-| Type  | TRUTH.TP | TRUTH.FN | QUERY.FP | METRIC.Recall | METRIC.Precision | METRIC.F1_Score |
-| ----- | -------- | -------- | -------- | ------------- | ---------------- | --------------- |
-| INDEL | 501527   | 2974     | 1262     | 0.994105      | 0.997591         | 0.995845        |
-| SNP   | 3306720  | 20776    | 4900     | 0.993756      | 0.998521         | 0.996133        |
+| Model type             | sample   | Type   |   TRUTH.TOTAL |   TRUTH.TP |   TRUTH.FN |   QUERY.TOTAL |   QUERY.FP |   Recall |   Precision |   F1_Score |
+|:-----------------------|:---------|:-------|--------------:|-----------:|-----------:|--------------:|-----------:|---------:|------------:|-----------:|
+| wgs                    | HG003    | INDEL  |        504501 |     501594 |       2907 |        937937 |       1190 | 0.994238 |    0.997729 |   0.99598  |
+| wgs                    | HG003    | SNP    |       3327496 |    3306720 |      20776 |       3817962 |       4880 | 0.993756 |    0.998527 |   0.996136 |
+| wes                    | HG003    | INDEL  |          1051 |       1024 |         27 |          1485 |          8 | 0.97431  |    0.992417 |   0.98328  |
+| wes                    | HG003    | SNP    |         25279 |      24983 |        296 |         27709 |         60 | 0.988291 |    0.997604 |   0.992926 |
+| pacbio                 | HG003    | INDEL  |        504501 |     501567 |       2934 |        989958 |       3057 | 0.994184 |    0.994162 |   0.994173 |
+| pacbio                 | HG003    | SNP    |       3327495 |    3321765 |       5730 |       4329942 |       4125 | 0.998278 |    0.998761 |   0.99852  |
+| ont-r104               | HG003    | INDEL  |        504501 |     460355 |      44146 |        830072 |      25676 | 0.912496 |    0.948695 |   0.930243 |
+| ont-r104               | HG003    | SNP    |       3327495 |    3321799 |       5696 |       4400475 |       4611 | 0.998288 |    0.998615 |   0.998451 |
+| rnaseq                 | HG005    | INDEL  |           188 |        151 |         37 |           285 |         36 | 0.803191 |    0.810526 |   0.806842 |
+| rnaseq                 | HG005    | SNP    |         11349 |      10656 |        693 |         12336 |        391 | 0.938937 |    0.964599 |   0.951595 |
+| hybrid-pacbio-illumina | HG003    | INDEL  |        504501 |     503264 |       1237 |        998274 |       2052 | 0.997548 |    0.996129 |   0.996838 |
+| hybrid-pacbio-illumina | HG003    | SNP    |       3327495 |    3324021 |       3474 |       4068058 |       1856 | 0.998956 |    0.999442 |   0.999199 |
 
-[See VCF stats report.](https://storage.googleapis.com/deepvariant/visual_reports/DeepVariant/1.9.0/WGS/deepvariant.output.visual_report.html)
+## Runtime
 
-## WES (Illumina)
+Each case study was run 5x times and the runtimes were averaged. Here we report
+the mean runtime in seconds, the standard deviation of runtimes, and a duration
+format (`mean_runtime`; hours, minutes, seconds).
 
-### Runtime
+### Total runtime only
 
-Runtime is on HG003 (all chromosomes).
-Reported runtime is an average of 5 runs.
+| Model type             | sample   | stage                | mean runtime    | total_runs |
+|:-----------------------|:---------|:---------------------|:----------------|-----------:|
+| wgs                    | HG003    | total                | 1h 8m 58s       |          5 |
+| exome                    | HG003    | total                | 4m 11s          |          5 |
+| pacbio                 | HG003    | total                | 1h 2m 17s       |          5 |
+| ont-r104               | HG003    | total                | 1h 43m 18s      |          5 |
+| rnaseq                 | HG005    | total                | 9m 1s           |          5 |
+| hybrid-pacbio-illumina | HG003    | total                | 2h 14m 54s      |          5 |
 
-Stage                            | Time (minutes)
--------------------------------- | -----------------
-make_examples                    | 3m0.54s
-call_variants                    | 0m33.30s
-postprocess_variants (with gVCF) | 0m38.91s
-vcf_stats_report (optional)      | 0m4.97s (optional)
-total                            | 4m45.64s
+### Detailed runtime
 
-### Accuracy
-
-hap.py results on HG003 (all chromosomes, using NIST v4.2.1 truth), which was
-held out while training.
-
-| Type  | TRUTH.TP | TRUTH.FN | QUERY.FP | METRIC.Recall | METRIC.Precision | METRIC.F1_Score |
-| ----- | -------- | -------- | -------- | ------------- | ---------------- | --------------- |
-| INDEL | 1024     | 27       | 8        | 0.97431       | 0.992417         | 0.98328         |
-| SNP   | 24983    | 296      | 60       | 0.988291      | 0.997604         | 0.992926        |
-
-[See VCF stats report.](https://storage.googleapis.com/deepvariant/visual_reports/DeepVariant/1.9.0/WES/deepvariant.output.visual_report.html)
-
-## PacBio (HiFi)
-
-### Updated dataset
-
-We have updated the PacBio test data from HG003 Sequel-II to
-latest Revio with SPRQ chemistry data to showcase performance on the updated
-platform and chemistry. The numbers reported here are generated using the bam
-that can be found in:
-
-```bash
-gs://deepvariant/pacbio-case-study-testdata/HG003.SPRQ.pacbio.GRCh38.nov2024.bam
-```
-
-Which is also available through [here](https://downloads.pacbcloud.com/public/revio/2024Q4/WGS/GIAB_trio/HG003/analysis/GRCh38.m84039_241002_000337_s3.hifi_reads.bc2020.bam).
-
-### Runtime
-
-Runtime is on HG003 (all chromosomes).
-Reported runtime is an average of 5 runs.
-
-Stage                            | Time (minutes)
--------------------------------- | -------------------
-make_examples                    | 36m48.09s
-call_variants                    | 11m33.13s
-postprocess_variants (with gVCF) | 4m47.06s
-vcf_stats_report (optional)      | 5m26.10s (optional)
-total                            | 66m14.44s (1h06m14.44s)
-
-### Accuracy
-
-hap.py results on HG003 (all chromosomes, using NIST v4.2.1 truth), which was
-held out while training.
-
-Starting from v1.4.0, users don't need to phase the BAMs first, and only need
-to run DeepVariant once.
-
-| Type  | TRUTH.TP | TRUTH.FN | QUERY.FP | METRIC.Recall | METRIC.Precision | METRIC.F1_Score |
-| ----- | -------- | -------- | -------- | ------------- | ---------------- | --------------- |
-| INDEL | 501348   | 3153     | 3117     | 0.99375       | 0.994046         | 0.993898        |
-| SNP   | 3321474  | 6021     | 3903     | 0.998191      | 0.998828         | 0.998509        |
-
-
-[See VCF stats report.](https://storage.googleapis.com/deepvariant/visual_reports/DeepVariant/1.9.0/PACBIO/deepvariant.output.visual_report.html)
-
-## ONT_R104
-
-### Runtime
-
-Runtime is on HG003 reads (all chromosomes).
-Reported runtime is an average of 5 runs.
-
-Stage                            | Time (minutes)
--------------------------------- | --------------------
-make_examples                    | 55m56.13s
-call_variants                    | 17m29.76s
-postprocess_variants (with gVCF) | 5m58.82s
-vcf_stats_report (optional)      | 6m23.70s (optional)
-total                            | 91m6.31s (1h31m6.31s)
-
-### Accuracy
-
-hap.py results on HG003 (all chromosomes, using NIST v4.2.1
-truth), which was held out while training.
-
-| Type  | TRUTH.TP | TRUTH.FN | QUERY.FP | METRIC.Recall | METRIC.Precision | METRIC.F1_Score |
-| ----- | -------- | -------- | -------- | ------------- | ---------------- | --------------- |
-| INDEL | 450891   | 53610    | 40728    | 0.893737      | 0.919559         | 0.906464        |
-| SNP   | 3319370  | 8125     | 2954     | 0.997558      | 0.999111         | 0.998334        |
-
-
-[See VCF stats report.](https://storage.googleapis.com/deepvariant/visual_reports/DeepVariant/1.9.0/ONT_R104/deepvariant.output.visual_report.html)
-
-## Hybrid (Illumina + PacBio HiFi)
-
-### Runtime
-
-Runtime is on HG003 (all chromosomes).
-Reported runtime is an average of 5 runs.
-
-Stage                            | Time (minutes)
--------------------------------- | ------------------
-make_examples                    | 62m2.28s
-call_variants                    | 65m3.32s
-postprocess_variants (with gVCF) | 3m43.18s
-vcf_stats_report (optional)      | 5m6.89s (optional)
-total                            | 154m30.64s (2h34m30.64s)
-
-### Accuracy
-
-Evaluating on HG003 (all chromosomes, using NIST v4.2.1 truth), which was held
-out while training the hybrid model.
-
-| Type  | TRUTH.TP | TRUTH.FN | QUERY.FP | METRIC.Recall | METRIC.Precision | METRIC.F1_Score |
-| ----- | -------- | -------- | -------- | ------------- | ---------------- | --------------- |
-| INDEL | 503160   | 1341     | 2243     | 0.997342      | 0.99577          | 0.996555        |
-| SNP   | 3323907  | 3588     | 1981     | 0.998922      | 0.999405         | 0.999163        |
-
-[See VCF stats report.](https://storage.googleapis.com/deepvariant/visual_reports/DeepVariant/1.9.0/HYBRID/deepvariant.output.visual_report.html)
+| Model type             | sample   | stage                | mean runtime    | total_runs |
+|:-----------------------|:---------|:---------------------|:----------------|-----------:|
+| wgs                    | HG003    | make_examples        | 46m 15s         |          5 |
+| wgs                    | HG003    | call_variants        | 15m 58s         |          5 |
+| wgs                    | HG003    | postprocess_variants | 6m 45s          |          5 |
+| wgs                    | HG003    | vcf_stats            | 5m 17s          |          5 |
+| wgs                    | HG003    | total                | 1h 8m 58s       |          5 |
+| exome                  | HG003    | make_examples        | 3m 6s           |          5 |
+| exome                  | HG003    | call_variants        | 34s             |          5 |
+| exome                  | HG003    | postprocess_variants | 30s             |          5 |
+| exome                  | HG003    | vcf_stats            | 6s              |          5 |
+| exome                  | HG003    | total                | 4m 11s          |          5 |
+| pacbio                 | HG003    | make_examples        | 37m 4s          |          5 |
+| pacbio                 | HG003    | call_variants        | 18m 28s         |          5 |
+| pacbio                 | HG003    | postprocess_variants | 6m 45s          |          5 |
+| pacbio                 | HG003    | vcf_stats            | 5m 46s          |          5 |
+| pacbio                 | HG003    | total                | 1h 2m 17s       |          5 |
+| ont-r104               | HG003    | make_examples        | 56m 4s          |          5 |
+| ont-r104               | HG003    | call_variants        | 32m 52s         |          5 |
+| ont-r104               | HG003    | postprocess_variants | 14m 21s         |          5 |
+| ont-r104               | HG003    | vcf_stats            | 7m 23s          |          5 |
+| ont-r104               | HG003    | total                | 1h 43m 18s      |          5 |
+| rnaseq                 | HG005    | make_examples        | 7m 31s          |          5 |
+| rnaseq                 | HG005    | call_variants        | 25s             |          5 |
+| rnaseq                 | HG005    | postprocess_variants | 1m 4s           |          5 |
+| rnaseq                 | HG005    | vcf_stats            | 5s              |          5 |
+| rnaseq                 | HG005    | total                | 9m 1s           |          5 |
+| hybrid-pacbio-illumina | HG003    | make_examples        | 1h 54s          |          5 |
+| hybrid-pacbio-illumina | HG003    | call_variants        | 1h 10m 4s       |          5 |
+| hybrid-pacbio-illumina | HG003    | postprocess_variants | 3m 55s          |          5 |
+| hybrid-pacbio-illumina | HG003    | vcf_stats            | 5m 3s           |          5 |
+| hybrid-pacbio-illumina | HG003    | total                | 2h 14m 54s      |          5 |
 
 ## Inspect outputs that produced the metrics above
 
@@ -188,7 +118,7 @@ Download and run any of the following case study scripts:
 
 ```
 # Get the script.
-curl -O https://raw.githubusercontent.com/google/deepvariant/r1.9/scripts/inference_deepvariant.sh
+curl -O https://raw.githubusercontent.com/google/deepvariant/r1.10/scripts/inference_deepvariant.sh
 
 # WGS
 bash inference_deepvariant.sh --model_preset WGS
@@ -208,8 +138,6 @@ bash inference_deepvariant.sh --model_preset HYBRID_PACBIO_ILLUMINA
 
 Runtime metrics are taken from the resulting log after each stage of
 DeepVariant. The runtime numbers reported above are the average of 5 runs each.
-The accuracy metrics come from the hap.py summary.csv output file.
-The runs are deterministic so all 5 runs produced the same output.
-
-[CPU instance with 96 CPUs]: deepvariant-details.md#command-for-a-cpu-only-machine-on-google-cloud-platform
+The accuracy metrics come from the hap.py summary.csv output file. The runs are
+deterministic so all 5 runs produced the same output.
 

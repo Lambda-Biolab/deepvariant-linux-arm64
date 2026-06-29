@@ -93,6 +93,9 @@ class VariantcallUtilsTests(parameterized.TestCase):
       dict(field_name='FT', reader=None, expected='LowQual'),
       dict(field_name='FT', reader=True, expected='LowQual'),
       dict(field_name='MT', reader=None, expected='0/0'),
+      dict(field_name='NAF', reader=None, expected=0.2),
+      dict(field_name='NDP', reader=None, expected=190),
+      dict(field_name='NAD', reader=None, expected=[2, 4]),
   )
   def test_get_format(self, field_name, reader, expected):
     if reader is not None:
@@ -109,6 +112,9 @@ class VariantcallUtilsTests(parameterized.TestCase):
     variantcall_utils.set_format(call, 'GT', [0, 1])
     variantcall_utils.set_format(call, 'FT', ['LowQual'])
     variantcall_utils.set_format(call, 'MT', ['0/0'])
+    variantcall_utils.set_format(call, 'NAF', 0.2)
+    variantcall_utils.set_format(call, 'NDP', 190)
+    variantcall_utils.set_format(call, 'NAD', [2, 4])
     actual = variantcall_utils.get_format(call, field_name, vcf_object=reader)
     self.assertEqual(actual, expected)
 
@@ -155,6 +161,24 @@ class VariantcallUtilsTests(parameterized.TestCase):
           getter=variantcall_utils.get_mt,
           values=['0/0', '0/1'],
       ),
+      dict(
+          field_name='NAF',
+          setter=variantcall_utils.set_naf,
+          getter=variantcall_utils.get_naf,
+          values=[0.2, 0.4, 0.555553],
+      ),
+      dict(
+          field_name='NDP',
+          setter=variantcall_utils.set_ndp,
+          getter=variantcall_utils.get_ndp,
+          values=range(10),
+      ),
+      dict(
+          field_name='NAD',
+          setter=variantcall_utils.set_nad,
+          getter=variantcall_utils.get_nad,
+          values=[[1, 5], [30, 29]],
+      ),
   )
   def test_variantcall_format_roundtrip(self, field_name, setter, getter,
                                         values):
@@ -169,8 +193,9 @@ class VariantcallUtilsTests(parameterized.TestCase):
 
   def test_set_ps(self):
     vc = variants_pb2.VariantCall()
-    variantcall_utils.set_ps(vc, '1-81')
-    self.assertEqual(vc.info['PS'].values[0].int_value, 100_081)
+    variant = variants_pb2.Variant(start=100)
+    variantcall_utils.set_ps(vc, variant)
+    self.assertEqual(vc.info['PS'].values[0].int_value, 101)
 
   @parameterized.parameters(
       dict(genotype=[], expected=False),

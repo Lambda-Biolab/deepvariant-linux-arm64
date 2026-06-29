@@ -35,6 +35,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -44,11 +45,13 @@
 #include <vector>
 
 #include "deepvariant/protos/deepvariant.pb.h"
+#include "absl/algorithm/container.h"
 #include "absl/container/btree_map.h"
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -63,7 +66,6 @@ namespace genomics {
 namespace deepvariant {
 
 const int kMinRefAlleleDepth = 3;
-const int kMinAllelesToPhase = 2;
 constexpr absl::string_view kRef = "REF";
 const int kNumOfPhases = 2;
 const float kMinMethylationThreshold = 0.4;
@@ -82,13 +84,7 @@ nucleus::StatusOr<std::vector<int>> DirectPhasing::PhaseReads(
   // Iterate positions in order. Calculate the score for each combination of
   // allele pairs.
   for (int i = 0; i < positions_.size(); i++) {
-    // TODO Call UpdateStartingScore if score cannot be improved from
-    // position to the next position. This happens with bad data where reads
-    // are mismapped. Good example is chr1:143175001-143200000.
-    // In this case we can break the graph and treat each piece as separate
-    // graphs. This TODO has a lower impact because it happens with "bad" data
-    // and DeepVariant will reject these candidates in most of the cases.
-    // The work is tracked in internal
+    // Score is calculated differently for the first position.
     if (i == 0) {
       UpdateStartingScore(vertices_by_position_[positions_[i]]);
       continue;
@@ -131,11 +127,22 @@ nucleus::StatusOr<std::vector<int>> DirectPhasing::PhaseReads(
     }
 
     // Enumerate all edge pairs
+    bool found_advancing_score = false;
     for (const auto& edge_1 : keyed_edges) {
       for (const auto& edge_2 : keyed_edges) {
         const Vertex& to_1 = edge_1.second.m_target;
         const Vertex& to_2 = edge_2.second.m_target;
+        auto prev_score_it =
+            scores_.find({edge_1.second.m_source, edge_2.second.m_source});
+        if (prev_score_it == scores_.end()) {
+          continue;
+        }
         Score score = CalculateScore(edge_1.second, edge_2.second);
+        // If score cannot advance then phasing cannot be continued. We need to
+        // have at least one combination that advances the score.
+        if (prev_score_it->second.score < score.score) {
+          found_advancing_score = true;
+        }
         // If the score for the given vertices already exists then we update
         // it if the new score is higher.
         auto existing_score_it = scores_.find({to_1, to_2});
@@ -159,13 +166,12 @@ nucleus::StatusOr<std::vector<int>> DirectPhasing::PhaseReads(
 
     // If after assigning all score we find out that all scores are the same
     // we cannot phase this position. In that case the phasing is restarted from
-    // the next position.
-    if (AllScoresAreTheSame(keyed_edges)) {
-      if (i < positions_.size() - 1) {
-        i++;
+    // the next position. The exception is when we are at the last position. In
+    // that case we don't do anything.
+    if (i < positions_.size() - 1 && (!found_advancing_score
+                                      || AllScoresAreTheSame(keyed_edges))) {
         UpdateStartingScore(vertices_by_position_[positions_[i]]);
         continue;
-      }
     }
   }  // for i in positions_
   // Backtrack from the last position. For each position where best partition is
@@ -193,21 +199,29 @@ bool DirectPhasing::HasAtLeastOneIncomingEdge(
 bool DirectPhasing::AllScoresAreTheSame(
     const absl::btree_map<std::pair<std::string, std::string>, Edge>&
         keyed_edges) const {
-  int prev_score = -1;
+  int min_score = std::numeric_limits<int>::max();
+  int max_score = 0;
   for (const auto& edge_1 : keyed_edges) {
     for (const auto& edge_2 : keyed_edges) {
       const Vertex& to_1 = edge_1.second.m_target;
       const Vertex& to_2 = edge_2.second.m_target;
       auto score_it = scores_.find({to_1, to_2});
-      if (score_it != scores_.end()) {
-        if (prev_score != -1 && score_it->second.score != prev_score) {
-          return false;
-        }
-        prev_score = score_it->second.score;
+      if (score_it == scores_.end()) {
+        continue;
+      }
+      if (score_it->second.score < min_score) {
+        min_score = score_it->second.score;
+      }
+      if (score_it->second.score > max_score) {
+        max_score = score_it->second.score;
       }
     }
   }
-  return true;
+  if (max_score - min_score > 1) {
+    return false;
+  } else {
+    return true;
+  }
 }
 
 bool DirectPhasing::CompareVertexPairByBases(
@@ -219,8 +233,14 @@ bool DirectPhasing::CompareVertexPairByBases(
   if (v2_1 == nullptr || v2_2 == nullptr) {
     return true;
   }
-  return graph_[v1_1].allele_info.bases + graph_[v1_2].allele_info.bases >
-      graph_[v2_1].allele_info.bases + graph_[v2_2].allele_info.bases;
+  if (graph_[v1_1].allele_info.bases > graph_[v2_1].allele_info.bases) {
+    return true;
+  }
+  if (graph_[v1_1].allele_info.bases < graph_[v2_1].allele_info.bases) {
+    return false;
+  } else {
+    return graph_[v1_2].allele_info.bases > graph_[v2_2].allele_info.bases;
+  }
 }
 
 absl::flat_hash_map<DirectPhasing::VertexPair,
@@ -282,14 +302,14 @@ DirectPhasing::MaxScore(int position) const {
 }
 
 void DirectPhasing::AssignPhasesToVertices() {
-  // Assigning a random valid score. The max_score should be at least no less
-  // then this.
   if (scores_.empty()) {
     return;
   }
   absl::flat_hash_map<VertexPair, Score>::const_iterator max_score_it =
       scores_.end();
   int i = positions_.size() - 1;
+  absl::flat_hash_map<VertexPair, Score>::const_iterator prev_score =
+      scores_.end();
   // Going backward from the last positions find the first position that can
   // be phased.
   while (i >= 0) {
@@ -304,25 +324,76 @@ void DirectPhasing::AssignPhasesToVertices() {
       }
     }
 
-    // Unwind from the first (from the last) position up and record phases.
-    auto prev_score = max_score_it;
+    // Unwind from the last position up and record phases at each position.
+    if (prev_score == scores_.end()) {
+      prev_score = max_score_it;
+    } else {
+      // Mark the first position in the block.
+      graph_[prev_score->first.phase_1_vertex]
+          .allele_info.is_first_in_block = true;
+      graph_[prev_score->first.phase_2_vertex]
+          .allele_info.is_first_in_block = true;
+    }
+    // bool is_first_in_block = true;
+    int num_verts_in_block = 0;
     while (max_score_it != scores_.end()) {
+      num_verts_in_block++;
+      // If phase_1 and phase_2 vertices are different then we assign phase 1
+      // to the first vertex and phase 2 to the second vertex.
       if (max_score_it->first.phase_1_vertex !=
           max_score_it->first.phase_2_vertex) {
         graph_[max_score_it->first.phase_1_vertex].allele_info.phase = 1;
         graph_[max_score_it->first.phase_2_vertex].allele_info.phase = 2;
+      // If phase_1 and phase_2 vertices are the same then we have a homozygous
+      // position.
+      } else {
+        graph_[max_score_it->first.phase_1_vertex].allele_info.phase = 0;
+        graph_[max_score_it->first.phase_2_vertex].allele_info.phase = 0;
+      }
+      // This should not happen because score is always increasing, or phasing
+      // is restarted if there is no increase.
+      // prev_score can be the same as current score if we start a new block and
+      // last score happens to be the same as current score.
+      if (max_score_it != prev_score && num_verts_in_block > 1 &&
+          max_score_it->second.score == prev_score->second.score) {
+        // Phasing cannot be continued. We have to break here.
+        graph_[max_score_it->first.phase_1_vertex].allele_info.phase = 0;
+        graph_[max_score_it->first.phase_2_vertex].allele_info.phase = 0;
+        i--;
+        LOG(WARNING) << "Unexpected phasing score at position "
+            << graph_[max_score_it->first.phase_1_vertex].allele_info.position
+            << " with score " << max_score_it->second.score;
+        break;
       }
       // Go to the next score.
-      max_score_it = scores_.find(
+      auto next_max_score_it = scores_.find(
           {max_score_it->second.from[0], max_score_it->second.from[1]});
-      if (max_score_it == prev_score) {
-        // Phasing cannot be continued. We have to break here.
+      if (next_max_score_it == scores_.end()) {
+        // If continuous phasing block consists of just one vertex then we
+        // cannot phase this block.
+        if (num_verts_in_block == 1)  {
+          graph_[max_score_it->first.phase_1_vertex].allele_info.phase = 0;
+          graph_[max_score_it->first.phase_2_vertex].allele_info.phase = 0;
+        }
+        i--;
+        prev_score = max_score_it;
+        break;
+      }
+      if (max_score_it == next_max_score_it) {
+        LOG(WARNING) << "Loop detected at position " << positions_[i];
         i--;
         break;
       }
       prev_score = max_score_it;
+      max_score_it = next_max_score_it;
       i--;
     }
+  }  // while all positions
+  if (prev_score != scores_.end()) {
+    graph_[max_score_it->first.phase_1_vertex]
+        .allele_info.is_first_in_block = true;
+    graph_[max_score_it->first.phase_2_vertex]
+        .allele_info.is_first_in_block = true;
   }
 }
 
@@ -335,6 +406,7 @@ std::vector<PhasedVariant> DirectPhasing::GetPhasedVariants() const {
     }
 
     std::array<std::string, 2> bases = {"", ""};
+    bool is_first_in_block = false;
     for (const Vertex& v : it->second) {
       const auto& vertex = graph_[v];
       if (vertex.allele_info.phase == 1) {
@@ -342,11 +414,13 @@ std::vector<PhasedVariant> DirectPhasing::GetPhasedVariants() const {
       } else if (vertex.allele_info.phase == 2) {
         bases[1] = vertex.allele_info.bases;
       }
+      is_first_in_block = vertex.allele_info.is_first_in_block;
     }
     if (!bases[0].empty() && !bases[1].empty()) {
       phased_variants.push_back({.position = pos,
                                  .phase_1_bases = bases[0],
-                                 .phase_2_bases = bases[1]});
+                                 .phase_2_bases = bases[1],
+                                 .is_first_in_block = is_first_in_block});
     }
   }
   return phased_variants;
@@ -373,10 +447,10 @@ std::vector<int> DirectPhasing::AssignPhasesToReads(
         read_phases[graph_[v].allele_info.phase]++;
       }
       if (read_phases[1] > read_phases[2] &&
-          read_phases[1] >= kMinAllelesToPhase) {
+          read_phases[1] >= options_.min_alleles_to_phase()) {
         phases[i] = 1;
       } else if (read_phases[2] > read_phases[1] &&
-                 read_phases[2] >= kMinAllelesToPhase) {
+                 read_phases[2] >= options_.min_alleles_to_phase()) {
         phases[i] = 2;
       } else {
         phases[i] = 0;
@@ -394,6 +468,7 @@ void DirectPhasing::InitializeReadMaps(
   size_t index = 0;
   for (const auto& read : reads) {
     read_to_index_[ReadKey(*read.p_)] = index;
+    index_to_read_name_[index] = read.p_->fragment_name();
     index++;
   }
 }
@@ -402,16 +477,20 @@ void DirectPhasing::InitializeReadMaps(
 // reads that support a connection between originating vertex in
 // <starting_score> and a new <vertex>. In addition we count reads that start
 // at <vertex>.
-absl::flat_hash_set<ReadIndex> DirectPhasing::FindSupportingReads(
+std::vector<absl::flat_hash_set<ReadIndex>> DirectPhasing::FindSupportingReads(
     const Vertex& vertex, const Score& starting_score, int phase) const {
   CHECK_GE(phase, 0);
   CHECK_LT(phase, kNumOfPhases);
   // Find all reads supporting <vertex> vertex
-  absl::flat_hash_set<ReadIndex> reads;
+  std::vector<absl::flat_hash_set<ReadIndex>> reads(2);
+  int num_first_alleles = 0;
   for (const ReadSupportInfo& rs : graph_[vertex].allele_info.read_support) {
-    if (rs.is_first_allele ||
-        starting_score.read_support[phase].contains(rs.read_index)) {
-      reads.insert(rs.read_index);
+    if (rs.is_first_allele) {
+      reads[1].insert(rs.read_index);
+      num_first_alleles++;
+    }
+    if (starting_score.read_support[phase].contains(rs.read_index)) {
+      reads[0].insert(rs.read_index);
     }
   }
   return reads;
@@ -431,27 +510,63 @@ DirectPhasing::Score DirectPhasing::CalculateScore(const Edge& edge1,
   // Getting a preceding score.
   const Score& prev_score = scores_.at({from_vertices[0], from_vertices[1]});
 
-  // Get all reads that support a given path.
-  absl::flat_hash_set<ReadIndex> supporting_reads_by_phase[kNumOfPhases];
+  // Get all reads that support a given path. There are two sets of reads that
+  // support each phase. The first set is reads that overlap previous vertex and
+  // current vertex. The second set is reads that start at current vertex.
+  std::vector<std::vector<absl::flat_hash_set<ReadIndex>>>
+      supporting_reads_by_phase(kNumOfPhases);
   for (int phase = 0; phase < kNumOfPhases; phase++) {
     supporting_reads_by_phase[phase] =
         FindSupportingReads(to_vertices[phase], prev_score, phase);
   }
 
-  absl::flat_hash_set<ReadIndex> all_reads;
+  absl::flat_hash_set<ReadIndex> all_supporting_reads;
+  absl::flat_hash_set<ReadIndex> all_first_allele_reads;
   for (int phase = 0; phase < kNumOfPhases; phase++) {
-    all_reads.insert(supporting_reads_by_phase[phase].begin(),
-                     supporting_reads_by_phase[phase].end());
+    all_supporting_reads.insert(supporting_reads_by_phase[phase][0].begin(),
+                                supporting_reads_by_phase[phase][0].end());
+    all_first_allele_reads.insert(supporting_reads_by_phase[phase][1].begin(),
+                                  supporting_reads_by_phase[phase][1].end());
   }
 
+  std::vector<absl::flat_hash_set<ReadIndex>> read_support_by_phase(
+      kNumOfPhases);
+  for (int phase = 0; phase < kNumOfPhases; phase++) {
+    // First set is reads that overlap previous vertex and current vertex.
+    // Second set is reads that start at current vertex.
+    for (int i = 0; i < 2; i++) {
+      read_support_by_phase[phase].insert(
+          supporting_reads_by_phase[phase][i].begin(),
+          supporting_reads_by_phase[phase][i].end());
+    }
+  }
   // New score is old score + number of all supporting reads.
-  return Score{.score = static_cast<int>(prev_score.score + all_reads.size()),
-               .from = {from_vertices[0], from_vertices[1]},
-               .read_support = {supporting_reads_by_phase[0],
-                                supporting_reads_by_phase[1]}};
+  // Reads that start at the new vertex are worth half as much as reads that
+  // support the new vertex.
+  // TODO Calculate score from mapping quality of supporting reads.
+  int score = prev_score.score + all_supporting_reads.size() +
+              all_first_allele_reads.size() / 2;
+  // At least 2 reads overlapping previous vertex and current vertex are
+  // required for each pase.
+  if (supporting_reads_by_phase[0][0].size() < 2 &&
+      supporting_reads_by_phase[1][0].size() < 2) {
+    score = prev_score.score;
+  }
+  return Score{
+      .score = score,
+      .from = {from_vertices[0], from_vertices[1]},
+      .read_support = {read_support_by_phase[0], read_support_by_phase[1]}};
 }
 
 void DirectPhasing::UpdateStartingScore(const std::vector<Vertex>& verts) {
+  // Remove all scores that may have been created in previous iterations.
+  for (int i = 0; i < verts.size(); i++) {
+    for (int j = 0; j < verts.size(); j++) {
+      const auto& v1 = verts[i];
+      const auto& v2 = verts[j];
+      scores_.erase({v1, v2});
+    }
+  }
   // Iterate all pairs of vertices.
   for (int i = 0; i < verts.size(); i++) {
     for (int j = i; j < verts.size(); j++) {
@@ -642,23 +757,31 @@ void DirectPhasing::AddCandidate(const DeepVariantCall& candidate) {
   }
 
   // Add alt alleles.
-  using AlleleSupportItem =
-      std::pair<std::string, DeepVariantCall_SupportingReadsExt>;
+  // using AlleleSupportItem =
+  //     std::pair<std::string, DeepVariantCall_SupportingReadsExt>;
+  struct AlleleSupportItem {
+    std::string allele;
+    DeepVariantCall_SupportingReadsExt read_support;
+    bool operator < (const AlleleSupportItem& other) const {
+      return allele < other.allele;
+    }
+  };
+
   // We need alleles sorted in order to make the algorithm deterministic.
   // Without it alleles order (and therefore phase assignment)
   // is random, but phasing is still correct.
-  std::vector<AlleleSupportItem> alleles(candidate.allele_support_ext().begin(),
-                                         candidate.allele_support_ext().end());
+  absl::btree_set<AlleleSupportItem> alleles;
+  for (const auto& [allele, read_support] : candidate.allele_support_ext()) {
+    if (allele != kUncalledAllele) {
+      alleles.insert(AlleleSupportItem({allele, read_support}));
+    }
+  }
 
-  std::sort(
-      alleles.begin(), alleles.end(),
-      [](const AlleleSupportItem& allele1, const AlleleSupportItem& allele2) {
-        return allele1.first < allele2.first;
-      });
-  for (const auto& [allele, read_support] : alleles) {
-    UpdateReadToAllelesMap(AddVertex(candidate.variant().start(),
-                                     AlleleTypeFromCandidate(allele, candidate),
-                                     allele, read_support.read_infos()));
+  for (const auto& allele_support : alleles) {
+    UpdateReadToAllelesMap(AddVertex(
+        candidate.variant().start(),
+        AlleleTypeFromCandidate(allele_support.allele, candidate),
+        allele_support.allele, allele_support.read_support.read_infos()));
   }
 }
 
@@ -666,15 +789,23 @@ void DirectPhasing::AddCandidate(const DeepVariantCall& candidate) {
 bool CandidateFilter(const DeepVariantCall& candidate, uint32_t* indel_end)  {
   // If there is only one allele and not enough support for the ref then
   // empirically we can consider this candidate homozygous.
-  if (candidate.allele_support_ext().size() <= 1 &&
+  const int num_called_alleles = absl::c_count_if(
+      candidate.allele_support_ext(),
+      [](const auto& p) { return p.first != kUncalledAllele; });
+
+  if (num_called_alleles <= 1 &&
        candidate.ref_support_ext().read_infos_size() < kMinRefAlleleDepth) {
     return false;
   }
   // The test filters out all candidates containing indels.
   for (const auto& [allele, read_support] : candidate.allele_support_ext()) {
+    if (allele == kUncalledAllele) {
+      continue;
+    }
     // Allele must not be overlapped by an INDEL and allele has to be a SNP.
-    if (candidate.variant().end() <= *indel_end || allele.size() !=
-        candidate.variant().end() - candidate.variant().start()) {
+    if (candidate.variant().end() <= *indel_end
+        || allele.size() != candidate.variant().end()
+                            - candidate.variant().start()) {
       if (*indel_end < candidate.variant().end()) {
         *indel_end = candidate.variant().end();
       }

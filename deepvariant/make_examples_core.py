@@ -35,6 +35,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 from typing import Any, DefaultDict, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
@@ -54,6 +55,7 @@ from deepvariant import sample as sample_lib
 from deepvariant import variant_caller as vc_base
 from deepvariant import vcf_candidate_importer
 from deepvariant import very_sensitive_caller
+from deepvariant.labeler import combined_labeler
 from deepvariant.labeler import customized_classes_labeler
 from deepvariant.labeler import haplotype_labeler
 from deepvariant.labeler import positional_labeler
@@ -69,6 +71,7 @@ from deepvariant.small_model import inference as small_model_inference
 from deepvariant.small_model import make_small_model_examples
 from deepvariant.vendor import timer
 from google.protobuf import text_format
+from tensorflow.python.platform import gfile
 from third_party.nucleus.io import fasta
 from third_party.nucleus.io import genomics_reader
 from third_party.nucleus.io import sam
@@ -82,6 +85,7 @@ from third_party.nucleus.util import ranges
 from third_party.nucleus.util import struct_utils
 from third_party.nucleus.util import utils
 from third_party.nucleus.util import variant_utils
+from third_party.nucleus.util import variantcall_utils
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.lib.io import tf_record
 # pylint: enable=g-direct-tensorflow-import
@@ -124,7 +128,7 @@ END_OF_REGION = -1
 END_OF_PARTITION = -2
 
 # Maximum length of partition in bases. It is limited by available memory.
-# TODO: For better flexibility it may be benefitial to expose it as a
+# TODO: For better flexibility it may be beneficial to expose it as a
 # flag.
 MAX_PARTITION_LEN = 1000000
 
@@ -136,6 +140,16 @@ NUM_REGIONS_FOR_MEAN_COVERAGE = 1500
 
 # Number of loci to use for computing mean coverage.
 NUM_LOCI_FOR_MEAN_COVERAGE = 10
+
+# Minimum difference between number of reads supporting each phase of an allele.
+# This constant is used to determine allele phase by counting the number of
+# supporting reads of each phase.
+MIN_DIFF_READS_FOR_ALLELE_PHASE = 3
+
+# Maximum number of reads supporting an opposite phase when allele phase is
+# calculated. If number of reads for an opposite phase is larger than this
+# value, we will assign phase 0 to the allele.
+MAX_NUM_READS_FOR_OPPOSITE_PHASE = 2
 
 # ---------------------------------------------------------------------------
 # Selecting variants of specific types (e.g., SNPs)
@@ -208,6 +222,9 @@ def make_vc_options(
       min_fraction_multiplier=flags_obj.vsc_min_fraction_multiplier,
       max_fraction_indels_for_non_target_sample=flags_obj.vsc_max_fraction_indels_for_non_target_sample,
       max_fraction_snps_for_non_target_sample=flags_obj.vsc_max_fraction_snps_for_non_target_sample,
+      vsc_min_indel_fraction_for_small_indels=flags_obj.vsc_min_indel_fraction_for_small_indels,
+      vsc_min_indel_fraction_for_large_indels=flags_obj.vsc_min_indel_fraction_for_large_indels,
+      vsc_small_indel_threshold=flags_obj.vsc_small_indel_threshold,
       # Not specified by default: fraction_reference_sites_to_emit,
       # Fixed random seed produced with 'od -vAn -N4 -tu4 < /dev/urandom'.
       random_seed=1400605801,
@@ -226,6 +243,7 @@ def make_vc_options(
       enable_methylation_aware_phasing=flags_obj.enable_methylation_aware_phasing,
       exclude_contigs_for_methylation_phasing=flags_obj.exclude_contigs_for_methylation_phasing,
       enable_methylation_calling=flags_obj.enable_methylation_calling,
+      use_rejected_alleles=flags_obj.use_rejected_alleles,
   )
 
 
@@ -316,6 +334,23 @@ def resolve_sam_aux_fields(
     aux_fields.add('OQ')
 
   # Add fields required for channels.
+  if (
+      'homopolymer_insertion_quality' in provided_channels
+      or 'homopolymer_deletion_quality' in provided_channels
+  ):
+    logging.info(
+        'Parsing tp AUX tag because homopolymer_insertion_quality or '
+        'homopolymer_deletion_quality channel is present.'
+    )
+    aux_fields.add('tp')
+
+  if 'inter_homopolymer_insertion_quality' in provided_channels:
+    logging.info(
+        'Parsing t0 AUX tag because inter_homopolymer_insertion_quality '
+        'channel is present.'
+    )
+    aux_fields.add('t0')
+
   for base_mod_channel in ['base_methylation', 'base_6ma']:
     if base_mod_channel in provided_channels:
       logging.info(
@@ -379,6 +414,10 @@ def log_summary_stats(
     )
   if options.call_small_model_examples:
     stat_to_description['n_small_model_calls'] = 'small model examples called'
+  if options.filter_low_vaf_candidates:
+    stat_to_description['n_filtered_low_vaf'] = (
+        'candidates filtered due to low VAF'
+    )
 
   stats_to_log = {k: v for k, v in n_stats.items() if k in stat_to_description}
   longest_stat = max((len(str(x)) for x in stats_to_log.values()))
@@ -400,6 +439,15 @@ def in_training_mode(options):
 
 def in_calling_mode(options):
   return options.mode == deepvariant_pb2.MakeExamplesOptions.CALLING
+
+
+def in_calling_mode_from_flag(mode_flag):
+  mode = deepvariant_pb2.MakeExamplesOptions.UNSPECIFIED
+  if mode_flag:
+    mode = parse_proto_enum_flag(
+        deepvariant_pb2.MakeExamplesOptions.Mode, mode_flag.upper()
+    )
+  return mode == deepvariant_pb2.MakeExamplesOptions.CALLING
 
 
 def in_candidate_sweep_mode(options):
@@ -480,7 +528,7 @@ def write_make_examples_run_info(run_info_proto, path):
         '# proto-file: learning/genomics/deepvariant/protos/deepvariant.proto\n'
         '# proto-message: MakeExamplesRunInfo\n'
     )
-    writer.write(text_format.MessageToString(run_info_proto, float_format=''))
+    writer.write(text_format.MessageToString(run_info_proto))
 
 
 # ---------------------------------------------------------------------------
@@ -1028,8 +1076,8 @@ def reservoir_sample_reads(
     k: The number of elements to sample.
     region: The region we're sampling from. This can be used to determine how
       many bases are covered in the region.
-    max_bases_to_cover: If this maximum number of bases is reached, the
-      samplling will stop.
+    max_bases_to_cover: If this maximum number of bases is reached, the sampling
+      will stop.
     random_generator: A random number generator or None.
 
   Returns:
@@ -1503,7 +1551,7 @@ class RegionProcessor:
     self._make_examples_native = make_examples_native
 
   def _make_direct_phasing_obj(self) -> direct_phasing.DirectPhasing:
-    return direct_phasing.DirectPhasing()
+    return direct_phasing.DirectPhasing(self.options.direct_phasing_options)
 
   def _make_allele_counter_for_region(
       self, region: range_pb2.Range, candidate_positions: Iterable[int]
@@ -1606,10 +1654,71 @@ class RegionProcessor:
         and candidate.variant.alternate_bases[0] == '.'
     )
 
+  def _should_filter_low_vaf(
+      self,
+      candidate: deepvariant_pb2.DeepVariantCall,
+      target_sample_name: str,
+  ) -> bool:
+    """Returns True if the candidate should be filtered based on low VAF criteria."""
+    if not self.options.filter_low_vaf_candidates:
+      return False
+
+    target_ref_reads = [
+        r
+        for r in candidate.ref_support_ext.read_infos
+        if r.sample_name == target_sample_name
+    ]
+
+    # Loop through all alt alleles and check if any of them are valid based on
+    # VAF, quality, and strand support.
+    for alt_allele in candidate.variant.alternate_bases:
+      if alt_allele not in candidate.allele_support_ext:
+        continue
+
+      # Get all reads for the alt allele that are from the target sample.
+      target_alt_reads = [
+          r
+          for r in candidate.allele_support_ext[alt_allele].read_infos
+          if r.sample_name == target_sample_name
+      ]
+
+      if not target_alt_reads:
+        continue
+
+      dp = len(target_alt_reads) + len(target_ref_reads)
+      if dp == 0:
+        continue
+
+      vaf = len(target_alt_reads) / dp
+      if vaf > self.options.low_vaf_threshold:
+        return False
+
+      # If VAF is low, check quality and strand support.
+      avg_bq = sum(r.average_base_quality for r in target_alt_reads) / len(
+          target_alt_reads
+      )
+      avg_mapq = sum(r.mapping_quality for r in target_alt_reads) / len(
+          target_alt_reads
+      )
+
+      if (
+          avg_bq >= self.options.low_vaf_max_base_quality
+          and avg_mapq >= self.options.low_vaf_max_mapping_quality
+      ):
+        return False
+
+    # If we are here, no allele was found to be valid.
+    return True
+
   def _initialize(self):
     """Initialize the resources needed for this work in the current env."""
     if self.initialized:
       raise ValueError('Cannot initialize this object twice')
+
+    if self.options.filter_low_vaf_candidates:
+      logging_with_options(
+          self.options, 'Low VAF candidate filtering is enabled.'
+      )
 
     self.ref_reader = fasta.IndexedFastaReader(self.options.reference_filename)
 
@@ -1627,13 +1736,12 @@ class RegionProcessor:
           self.options.call_small_model_examples
           and sample.options.small_model_path
       ):
-        sample.small_model_variant_caller = (
-            small_model_inference.SmallModelVariantCaller.from_model_path(
-                model_path=sample.options.small_model_path,
-                snp_gq_threshold=self.options.small_model_snp_gq_threshold,
-                indel_gq_threshold=self.options.small_model_indel_gq_threshold,
-                batch_size=self.options.small_model_inference_batch_size,
-            )
+        sample.small_model_variant_caller = small_model_inference.SmallModelVariantCaller.from_model_path(
+            model_path=sample.options.small_model_path,
+            snp_gq_threshold=self.options.small_model_snp_gq_threshold,
+            indel_gq_threshold=self.options.small_model_indel_gq_threshold,
+            batch_size=self.options.small_model_inference_batch_size,
+            emit_all_candidates=self.options.small_model_emit_all_candidates,
         )
 
     if 'allele_frequency' in self.options.pic_options.channels:
@@ -1702,7 +1810,7 @@ class RegionProcessor:
     ):
       logging.info(
           'For --variant_caller=vcf_candidate_importer, we '
-          'default the labeler_algorithm to positional_labler.'
+          'default the labeler_algorithm to positional_labeler.'
       )
       return positional_labeler.PositionalVariantLabeler(
           truth_vcf_reader=truth_vcf_reader, confident_regions=confident_regions
@@ -1720,6 +1828,15 @@ class RegionProcessor:
         == deepvariant_pb2.MakeExamplesOptions.HAPLOTYPE_LABELER
     ):
       return haplotype_labeler.HaplotypeLabeler(
+          truth_vcf_reader=truth_vcf_reader,
+          ref_reader=self.ref_reader,
+          confident_regions=confident_regions,
+      )
+    elif (
+        self.options.labeler_algorithm
+        == deepvariant_pb2.MakeExamplesOptions.COMBINED_LABELER
+    ):
+      return combined_labeler.CombinedLabeler(
           truth_vcf_reader=truth_vcf_reader,
           ref_reader=self.ref_reader,
           confident_regions=confident_regions,
@@ -2097,7 +2214,10 @@ class RegionProcessor:
     )
 
   def process(
-      self, region: range_pb2.Range, region_n: Optional[int] = None
+      self,
+      region: range_pb2.Range,
+      n_stats: Dict[str, int],
+      region_n: Optional[int] = None,
   ) -> Tuple[
       Dict[str, Sequence[deepvariant_pb2.DeepVariantCall]],
       Dict[str, Sequence[variants_pb2.Variant]],
@@ -2110,6 +2230,7 @@ class RegionProcessor:
     Args:
       region: A nucleus.genomics.v1.Range proto. Specifies the region on the
         genome we should process.
+      n_stats: A dictionary for collecting statistics.
       region_n: Order number of the region being processed by this process.
 
     Returns:
@@ -2225,6 +2346,19 @@ class RegionProcessor:
         candidates = list(
             filter_candidates(candidates, self.options.select_variant_types)
         )
+
+      if self.options.filter_low_vaf_candidates and len(self.samples) > 1:
+        candidates_before_filtering = len(candidates)
+        candidates = [
+            c
+            for c in candidates
+            if not self._should_filter_low_vaf(c, sample.options.name)
+        ]
+        candidates_after_filtering = len(candidates)
+        num_filtered = candidates_before_filtering - candidates_after_filtering
+        if num_filtered > 0:
+          n_stats['n_filtered_low_vaf'] += num_filtered
+        candidates_by_sample[role] = candidates
 
       if (
           hasattr(self, 'exclude_variants_vcf_reader')
@@ -2445,15 +2579,34 @@ class RegionProcessor:
 
   def filter_candidates_by_region(
       self,
-      candidates: Sequence[deepvariant_pb2.DeepVariantCall],
+      candidates: np.ndarray,
       region: range_pb2.Range,
-  ) -> Sequence[deepvariant_pb2.DeepVariantCall]:
-    return [
-        candidate
-        for candidate in candidates
-        if candidate.variant.start >= region.start
-        and candidate.variant.start < region.end
-    ]
+  ) -> np.ndarray:
+    """Filters candidate variants by region.
+
+    This function takes a list of candidate variants and a region,
+    and returns a list of candidate variants that are within the region.
+
+    Args:
+      candidates: A list of DeepVariantCall protos.
+      region: A nucleus.genomics.v1.Range object specifying the region we want
+        to filter for.
+
+    Returns:
+      A list of DeepVariantCall protos in an np.array
+    """
+
+    def filter_region(candidate, region):
+      return (
+          candidate.variant.start >= region.start
+          and candidate.variant.start < region.end
+      )
+
+    filter_region_vec = np.vectorize(filter_region)
+    if candidates.any():
+      return candidates[filter_region_vec(candidates, region)]
+    else:
+      return np.array([])
 
   def _root_join(self, path, makedirs=True):
     fullpath = os.path.join(
@@ -2464,19 +2617,87 @@ class RegionProcessor:
       epath.Path(subdir).mkdir(parents=True, exist_ok=True)
     return fullpath
 
-  def _file_for_region(self, region, basename):
+  def _file_for_region_and_sample(self, region, sample_name, basename):
     """Returns the path to a file in a region-specific subdirectory."""
     # TODO: This logic currently only works for single sample.
     # Once we extend to multi-sample, we can remove this assert.
-    assert len(self.samples) == 1
-    return self._root_join(os.path.join(ranges.to_literal(region), basename))
+    return self._root_join(
+        os.path.join(ranges.to_literal(region), f'{sample_name}_{basename}')
+    )
 
-  def log_graph_metrics(self, region, graph):
+  def log_graph_metrics(self, region, sample, graph):
     """Logs, if enabled, graph construction information for region."""
     if graph:
-      dest_file = self._file_for_region(region, 'graph.dot')
+      dest_file = self._file_for_region_and_sample(
+          region, sample.options.role, 'graph.dot'
+      )
       with epath.Path(dest_file).open('w') as f:
         f.write(graph.graphviz())
+
+  def _get_phased_genotype_from_counts(
+      self, phase_1_count: int, phase_2_count: int
+  ) -> int:
+    """Determines the phased genotype (1, 2, or 0) from phase counts.
+
+    Assigns phase to the allele that is supported by more reads. The difference
+    between the number of reads supporting each phase must be at least
+    MIN_DIFF_READS_FOR_ALLELE_PHASE, and the count of the opposite phase must
+    not exceed MAX_NUM_READS_FOR_OPPOSITE_PHASE. Returns 0 if no phase is
+    assigned.
+
+    Args:
+      phase_1_count: The number of reads supporting phase 1.
+      phase_2_count: The number of reads supporting phase 2.
+
+    Returns:
+      1 if phase 1 is confidently assigned, 2 if phase 2 is confidently
+      assigned, otherwise 0.
+    """
+    if (
+        phase_1_count > phase_2_count
+        and phase_1_count - phase_2_count > MIN_DIFF_READS_FOR_ALLELE_PHASE
+        and phase_2_count <= MAX_NUM_READS_FOR_OPPOSITE_PHASE
+    ):
+      return 1
+    elif (
+        phase_2_count > phase_1_count
+        and phase_2_count - phase_1_count > MIN_DIFF_READS_FOR_ALLELE_PHASE
+        and phase_1_count <= MAX_NUM_READS_FOR_OPPOSITE_PHASE
+    ):
+      return 2
+    else:
+      return 0
+
+  def infer_allele_phase(
+      self, alternate_bases, ref_support_ext, allele_support, read_id_to_phase
+  ):
+    """Infers allele phase from supporting reads."""
+    phased_genotype = [0] * (len(alternate_bases) + 1)
+    index = 0
+    for allele_index in range(len(alternate_bases) + 1):
+      phases = [0, 0, 0]  # number of reads supporting each phase.
+      # allele_index == 0 is REF
+      if allele_index == 0:
+        # Get REF supporting reads.
+        for ref_read_support in ref_support_ext:
+          # In multi-sample mode we have reads that support an allele but
+          # come from a non-target sample. We ignore these reads.
+          if ref_read_support.read_name in read_id_to_phase:
+            phases[read_id_to_phase[ref_read_support.read_name]] += 1
+      else:
+        # Find allele bases, then get supporting reads.
+        if allele_index > len(alternate_bases) or allele_index < 1:
+          continue
+        alt_bases = alternate_bases[allele_index - 1]
+        for read_name in allele_support[alt_bases].read_names:
+          if read_name in read_id_to_phase:
+            phases[read_id_to_phase[read_name]] += 1
+
+      phased_genotype[index] = self._get_phased_genotype_from_counts(
+          phases[1], phases[2]
+      )
+      index += 1
+    return phased_genotype
 
   def add_phasing_to_candidate(self, candidates, read_id_to_phase):
     """Adds phasing information to candidates.
@@ -2487,7 +2708,7 @@ class RegionProcessor:
 
     This function populates the ALT_PS and PS_CONTIG info fields in the
     candidate variant protos. The ALT_PS field is a phased genotype.
-    The PS_CONTIG field is a string that identifies the continious contig
+    The PS_CONTIG field is a string that identifies the continuous contig
     within which the phasing is consistent.
 
     Returns:
@@ -2531,50 +2752,83 @@ class RegionProcessor:
         if alt_1_order and alt_2_order:
           phased_genotype[alt_1_order[0]] = 1
           phased_genotype[alt_2_order[0]] = 2
-          variant_utils.set_info(candidate.variant, 'ALT_PS', phased_genotype)
-          variant_utils.set_info(candidate.variant, 'PS_CONTIG', phase_contig)
+          variant_utils.set_info(
+              candidate.variant, dv_constants.PHASED_GENOTYPE, phased_genotype
+          )
+          variant_utils.set_info(
+              candidate.variant, dv_constants.VARIANT_PHASE_SET, phase_contig
+          )
+          variant_utils.set_info(
+              candidate.variant,
+              dv_constants.FIRST_VARIANT_IN_PHASE_SET,
+              phased_variants[phased_variants_index].is_first_in_block,
+          )
         phased_variants_index += 1
       # If variant is not phased, we infer phase from read phases and supporting
       # reads.
       else:
-        # Count the number of reads of each phase supporting the allele.
-        # Assign phase to the allele that is supported by more reads. The
-        # difference between the number of reads supporting each phase must be
-        # at least 2.
-        phased_genotype = [0] * (len(candidate.variant.alternate_bases) + 1)
-        index = 0
-        for allele_index in range(len(candidate.variant.alternate_bases) + 1):
-          phases = [0, 0, 0]  # number of reads supporting each phase.
-          # allele_index == 0 is REF
-          if allele_index == 0:
-            # Get REF supporting reads.
-            for ref_read_support in candidate.ref_support_ext.read_infos:
-              # In multi-sample mode we have reads that support an allele but
-              # come from a non-target sample. We ignore these reads.
-              if ref_read_support.read_name in read_id_to_phase:
-                phases[read_id_to_phase[ref_read_support.read_name]] += 1
-          else:
-            # Find allele bases, then get supporting reads.
-            if (
-                allele_index > len(candidate.variant.alternate_bases)
-                or allele_index < 1
-            ):
-              continue
-            alt_bases = candidate.variant.alternate_bases[allele_index - 1]
-            for read_support in candidate.allele_support_ext[
-                alt_bases
-            ].read_infos:
-              if read_support.read_name in read_id_to_phase:
-                phases[read_id_to_phase[read_support.read_name]] += 1
-
-          if phases[1] > phases[2] and phases[1] - phases[2] > 1:
-            phased_genotype[index] = 1
-          elif phases[2] > phases[1] and phases[2] - phases[1] > 1:
-            phased_genotype[index] = 2
-          index += 1
-        variant_utils.set_info(candidate.variant, 'ALT_PS', phased_genotype)
-        variant_utils.set_info(candidate.variant, 'PS_CONTIG', phase_contig)
+        phased_genotype = self.infer_allele_phase(
+            candidate.variant.alternate_bases,
+            candidate.ref_support_ext.read_infos,
+            candidate.allele_support,
+            read_id_to_phase,
+        )
+        variant_utils.set_info(
+            candidate.variant, dv_constants.PHASED_GENOTYPE, phased_genotype
+        )
+        variant_utils.set_info(
+            candidate.variant, dv_constants.VARIANT_PHASE_SET, phase_contig
+        )
+        variant_utils.set_info(
+            candidate.variant,
+            dv_constants.FIRST_VARIANT_IN_PHASE_SET,
+            False,
+        )
     return len(phased_variants)
+
+  def assign_phase_from_normal(self, tumor_candidates, tumor_reads_to_phase):
+    """Use phase information from the normal sample to assign phase to tumor."""
+    normal_phased_variants = {
+        x.position: x for x in self.direct_phasing_cpp.get_phased_variants()
+    }
+    # Construct counters for each read.
+    phase_counter = collections.OrderedDict(
+        (f'{read.fragment_name}/{read.read_number}', collections.Counter())
+        for read in tumor_reads_to_phase
+    )
+
+    for tumor_candidate in tumor_candidates:
+      if tumor_candidate.variant.start in normal_phased_variants:
+        phased_variant = normal_phased_variants[tumor_candidate.variant.start]
+        allele_support_reads = {
+            k: v.read_names for k, v in tumor_candidate.allele_support.items()
+        }
+        allele_support_reads['REF'] = tumor_candidate.ref_support
+        for allele, read_set in allele_support_reads.items():
+          if allele == phased_variant.phase_1_bases:
+            phase_key = 1
+          elif allele == phased_variant.phase_2_bases:
+            phase_key = 2
+          else:
+            continue
+          for read_name in read_set:
+            if read_name in phase_counter:
+              phase_counter[read_name][phase_key] += 1
+
+    # Now assign phase information to reads.
+    read_phases = []
+    for read in tumor_reads_to_phase:
+      read_key = f'{read.fragment_name}/{read.read_number}'
+      read_phase_counter = phase_counter[read_key]
+      # Assign phase information.
+      phase_1_count = read_phase_counter.get(1, 0)
+      phase_2_count = read_phase_counter.get(2, 0)
+      phase = self._get_phased_genotype_from_counts(
+          phase_1_count, phase_2_count
+      )
+      read_phases.append(phase)
+
+    return read_phases
 
   def candidates_in_region(
       self,
@@ -2600,7 +2854,7 @@ class RegionProcessor:
       A 3-tuple of (candidates, gvcfs, read_phases).
       The first value, candidates, is a dict keyed by sample role, where each
       item is a list of deepvariant_pb2.DeepVariantCalls objects, in
-      coordidate order.
+      coordinate order.
       The second value, gvcfs, is a dict keyed by sample role, where
       each item is a list of nucleus.genomics.v1.Variant protos containing gVCF
       information for all reference sites, if gvcf generation is enabled,
@@ -2627,6 +2881,8 @@ class RegionProcessor:
       # we need to return the gVCF records calculated by the caller below.
       return {}, {}, {}, 0
 
+    effective_region = padded_region or region
+
     allele_counters = {}
     candidate_positions = []
     if self.options.allele_counter_options.track_ref_reads:
@@ -2634,14 +2890,9 @@ class RegionProcessor:
       for sample in self.samples:
         if sample.options.reads_filenames:
           # Calculate potential candidate positions from allele counts
-          if padded_region is not None:
-            sample.allele_counter = self._make_allele_counter_for_region(
-                padded_region, []
-            )
-          else:
-            sample.allele_counter = self._make_allele_counter_for_region(
-                region, []
-            )
+          sample.allele_counter = self._make_allele_counter_for_region(
+              effective_region, []
+          )
 
           for read in sample.reads:
             sample.allele_counter.add(read, sample.options.name)
@@ -2677,27 +2928,15 @@ class RegionProcessor:
           )
           sample.reads = iter(sample._cached_region_reads)
 
-          if padded_region is not None:
-            sample.allele_counter = (
-                self._make_allele_counter_for_read_overlap_region(
-                    padded_region, full_range, candidate_positions
-                )
-            )
-          else:
-            sample.allele_counter = (
-                self._make_allele_counter_for_read_overlap_region(
-                    region, full_range, candidate_positions
-                )
-            )
+          sample.allele_counter = (
+              self._make_allele_counter_for_read_overlap_region(
+                  effective_region, full_range, candidate_positions
+              )
+          )
         else:
-          if padded_region is not None:
-            sample.allele_counter = self._make_allele_counter_for_region(
-                padded_region, candidate_positions
-            )
-          else:
-            sample.allele_counter = self._make_allele_counter_for_region(
-                region, candidate_positions
-            )
+          sample.allele_counter = self._make_allele_counter_for_region(
+              effective_region, candidate_positions
+          )
 
         for read in sample.reads:
           if (
@@ -2740,6 +2979,7 @@ class RegionProcessor:
       candidates[role], gvcfs[role] = sample.variant_caller.calls_and_gvcfs(
           allele_counters=allele_counters,
           target_sample=sample.options.name,
+          target_role=sample.options.role,
           include_gvcfs=gvcf_output_enabled(self.options),
           include_med_dp=self.options.include_med_dp,
           left_padding=left_padding,
@@ -2751,17 +2991,24 @@ class RegionProcessor:
       # SNP candidates will be phased using direct phasing.
       # Methylated reference sites will be phased using methylation-aware
       # phasing after direct phasing.
-      snp_candidates = []
-      methylated_ref_sites = []
+      # Store candidates in a numpy array for easier indexing.
+      candidates[role] = np.array(candidates[role])
+      snp_candidate_idx = np.arange(len(candidates[role]))
+      methylated_ref_site_idx = np.array([])
+      methylated_ref_sites = np.array([])
       if self.options.enable_methylation_aware_phasing:
-        for candidate in candidates[role]:
-          if self._is_methylated_reference_site(candidate):
-            methylated_ref_sites.append(candidate)
-          else:
-            snp_candidates.append(candidate)
+        # If methylation aware phasing is enabled, filter for methylated
+        # reference sites and SNP candidates.
+        is_methylated_ref_site = np.array(
+            list(map(self._is_methylated_reference_site, candidates[role]))
+        )
+        methylated_ref_site_idx = np.where(is_methylated_ref_site)[0]
+        methylated_ref_sites = candidates[role][methylated_ref_site_idx]
 
-        # Only use SNP candidates for direct phasing
-        candidates[role] = snp_candidates
+        snp_candidate_idx = np.where(~is_methylated_ref_site)[0]
+
+      # Only use SNP candidates for direct phasing
+      snp_candidates = candidates[role][snp_candidate_idx]
 
       if self.options.phase_reads and not sample.options.skip_phasing:
         if padded_region is not None:
@@ -2784,28 +3031,61 @@ class RegionProcessor:
         # Skip phasing if number of candidates is over the phase_max_candidates.
         if (
             self.options.phase_max_candidates
-            and len(candidates[role]) > self.options.phase_max_candidates
+            and len(snp_candidates) > self.options.phase_max_candidates
         ):
           logging_with_options(
               self.options,
               'Skip phasing: len(candidates[%s]) is %s.'
-              % (role, len(candidates[role])),
+              % (role, len(snp_candidates)),
           )
         else:
-          read_phases = self.direct_phasing_cpp.phase(
-              candidates[role], reads_to_phase
-          )
+          # Assign phase information from normal to tumor.
+          if (
+              self.options.assign_phase_from_normal
+              and role == 'tumor'
+              and 'normal' in candidates
+          ):
+            read_phases = self.assign_phase_from_normal(
+                snp_candidates, reads_to_phase
+            )
+          else:
+            read_phases = self.direct_phasing_cpp.phase(
+                snp_candidates, reads_to_phase
+            )
 
           # If methylation-aware phasing is enabled, run it on unphased reads.
           if (
               self.options.enable_methylation_aware_phasing
-              and methylated_ref_sites
+              and methylated_ref_sites.size
           ):
+            # Before performing methylation-aware phasing, tag phased reads
+            # with the snp-based phasing:
+            for read, phase in zip(reads_to_phase, read_phases):
+              if phase in [1, 2]:
+                read.info['XP'].values.add(string_value='snp')
+
             # Perform methylation-aware phasing on unphased reads from direct
-            # phasing.
-            read_phases = methylation_aware_phasing.phase(
+            # phasing. This call also returns the p-values from a Wilcoxon
+            # signed rank test for each methylated reference site and its
+            # association with existing haplotypes.
+            read_phases, methyl_p_values = methylation_aware_phasing.phase(
                 reads_to_phase, read_phases, methylated_ref_sites
             )
+
+            assert len(methyl_p_values) == len(methylated_ref_sites)
+
+            # After methylation-aware phasing, tag newly-phased reads as being
+            # phased using 5mC calls.
+            for read, phase in zip(reads_to_phase, read_phases):
+              if not read.info.get('XP') and phase in [1, 2]:
+                read.info['XP'].values.add(string_value='5mC')
+
+            for candidate, p_value in zip(
+                candidates[role][methylated_ref_site_idx], methyl_p_values
+            ):
+              for call in candidate.variant.calls:
+                if p_value > 0:
+                  variantcall_utils.set_mi(call, p_value)
 
           # Assign phase tag to reads after direct phasing and/or
           # methylation-aware phasing.
@@ -2849,7 +3129,7 @@ class RegionProcessor:
             if self.options.pic_options.reverse_haplotypes:
               if read_phase in [1, 2]:
                 read_phase = 1 + (read_phase % 2)
-            read.info['HP'].values.add(int_value=read_phase)
+            read.info['HP'].values.add(int_value=read_phase)  #  Haplotype phase
             read_phases_by_sample[role][read_key] = read_phase
             if writer and self.options.read_phases_output:
               writer.write_read_phase(read, read_phase, region_n)
@@ -2860,7 +3140,6 @@ class RegionProcessor:
           # This logic below will write out the DOT files under the directory
           # specified by the flag --realigner_diagnostics, if phase_reads is
           # set to True.
-          # TODO: Extend the logic to work for multi-sample cases.
 
           if self.options.phasing_error_stats_output:
             if (
@@ -2880,15 +3159,22 @@ class RegionProcessor:
       if (
           self.options.phase_reads
           and self.options.realigner_options.diagnostics.output_root
-          and len(self.samples) == 1  # TODO
       ):
-        self.log_graph_metrics(region, self.direct_phasing_cpp)
+        self.log_graph_metrics(region, sample, self.direct_phasing_cpp)
+
+      # If methylation-aware phasing is enabled, but methylation-calling is
+      # disabled, then filter out methylation ref sites from output.
+      if (
+          not self.options.enable_methylation_calling
+          and self.options.enable_methylation_aware_phasing
+      ):
+        # Filter out methylated ref site indices from candidates.
+        candidates[role] = candidates[role][snp_candidate_idx]
 
       if padded_region is not None:
         candidates[role] = self.filter_candidates_by_region(
             candidates[role], region
         )
-
     return candidates, gvcfs, read_phases_by_sample, phased_candidates_count
 
   def get_channels(self) -> List[int]:
@@ -3079,12 +3365,9 @@ def processing_regions_from_options(
     ValueError: if the regions to call is empty.
 
   Returns:
-    A tuple of three values, (regions, sample_regions, calling_regions).
+    A tuple of two values, (regions, calling_regions).
     regions: a list of nucleus.genomics.v1.Range protos of the regions we should
     process.
-    sample_regions: a list of nucleus.genomics.v1.Range protos of the regions we
-    should sample on to calculate global information over the genome such as
-    mean coverage.
     calling_regions: a RangeSet containing the calling regions calculated from
     intersection of input regions, confident regions and regions to exclude.
   """
@@ -3301,6 +3584,7 @@ def make_examples_runner(options: deepvariant_pb2.MakeExamplesOptions):
       'n_small_model_examples': 0,
       'n_small_model_calls': 0,
       'n_phased_candidates': 0,
+      'n_filtered_low_vaf': 0,
   }
   example_shape = None
   region_n = 0
@@ -3336,7 +3620,7 @@ def make_examples_runner(options: deepvariant_pb2.MakeExamplesOptions):
         runtimes,
         read_phases_by_sample,
         phased_candidates_count,
-    ) = region_processor.process(region, region_n)
+    ) = region_processor.process(region, n_stats, region_n)
     for sample in samples_that_need_writers:
       role = sample.options.role
       if role not in candidates_by_sample:
@@ -3501,3 +3785,134 @@ def make_examples_runner(options: deepvariant_pb2.MakeExamplesOptions):
 
   region_processor.make_examples_native.signal_shard_finished()
   log_summary_stats(options, n_stats)
+
+
+def get_model_example_info_json_path(
+    checkpoint: str, checkpoint_json: Optional[str] = None
+) -> str:
+  """Returns the path to the example_info.json file for the given checkpoint path."""
+  if checkpoint_json:
+    return checkpoint_json
+
+  # --checkpoint flag may contain the path to saved model or a checkpoint.
+  # Example: --checkpoint=/some/path/to/saved_model/
+  # Example: --checkpoint=/some/path/to/checkpoint/model.ckpt
+  # The algorithm of calculating the path to example_info.json should
+  # handle all previous releases, both ckpt and saved model cases.
+  # We assume that the name is example_info.json if checkpoint flag points
+  # to a saved model.
+  # File name may vary if checkpoint is set with cktp path.
+  # If checkpoint is a directory containing saved_model.pb then it is a
+  # saved model.
+  if gfile.Exists(f'{checkpoint}/saved_model.pb'):
+    model_example_info_json = f'{checkpoint}/model.example_info.json'
+    example_info_json = f'{checkpoint}/example_info.json'
+  else:
+    # checkpoint is a ckpt path. We need to strip the last part of the path
+    # to get the directory. Inside, we need to find the file which ends
+    # with example_info.json.
+    model_dir = os.path.dirname(checkpoint)
+    # We expect the json file to be in the same directory as the checkpoint.
+    model_example_info_json = f'{model_dir}/model.example_info.json'
+    example_info_json = f'{model_dir}/example_info.json'
+  if gfile.Exists(model_example_info_json):
+    return model_example_info_json
+
+  if gfile.Exists(example_info_json):
+    logging.warning(
+        'model.example_info.json not found in %s. Fallback to an'
+        ' example_info.json file in the same directory.',
+        checkpoint,
+    )
+    return example_info_json
+
+  raise ValueError(
+      f'model.example_info.json not found in {checkpoint}. Please'
+      ' check the checkpoint path.'
+  )
+
+
+def apply_flags_for_calling(flags_obj: flags.FlagValues):
+  """Read flags for calling from the model.example_info.json file and apply them to the flag values object.
+
+  Flag values are resolved in the following order:
+  1. Command Line: User-provided flags take the highest priority.
+  2. model.example_info.json: Flags defined in the example_info.json
+     file are applied next.
+  3. Default Values: If a flag is not specified elsewhere,
+     its default value is used.
+
+  This function will also check that the partition_size and
+  max_reads_per_partition flags are both set or not set at all.
+
+  Args:
+    flags_obj: The flag values object.
+  """
+  example_info_filename: Optional[str] = None
+
+  # Only read the example_info.json file in calling mode, if a checkpoint is
+  # provided.
+  if in_calling_mode_from_flag(flags_obj.mode) and flags_obj.checkpoint:
+    try:
+      example_info_filename = get_model_example_info_json_path(
+          flags_obj.checkpoint
+      )
+    except ValueError as e:
+      logging.exception(
+          'Error: Failed to get model.example_info.json path: %s', e
+      )
+
+  logging.info('model.example_info filename: %s', example_info_filename)
+
+  flags_map = {}
+  if example_info_filename is not None:
+    logging.info('Reading flags_for_calling from %s', example_info_filename)
+
+    try:
+      with epath.Path(example_info_filename).open('r') as fin:
+        flags_map = json.load(fin)['flags_for_calling']
+    except IOError:
+      logging.info(
+          'Example info file not found. Options will only be set that have been'
+          ' passed in directly.'
+      )
+    except KeyError:
+      logging.info(
+          'No options are set from the `model.example_info.json` file because'
+          " the 'flags_for_calling' section is missing."
+      )
+
+  if flags_map:
+    logging.info(
+        'Flags for calling:\n%s',
+        '\n'.join([f'{k}: {v}' for k, v in flags_map.items()]),
+    )
+
+  for flag_name in flags_map:
+    if flag_name not in flags_obj:
+      logging.error(
+          'Error: Flag "%s" is not defined as an application flag.', flag_name
+      )
+      sys.exit(1)
+
+    flag = flags_obj[flag_name]
+    if flag.present:
+      logging.warning(
+          'Flag %s is specified in model.example_info.json [%s] but overridden'
+          ' by command line with value [%s]',
+          flag_name,
+          flags_map[flag_name],
+          flag.value,
+      )
+      continue
+
+    flag.value = flags_map[flag_name]
+
+  if (
+      flags_obj['partition_size'].present
+      != flags_obj['max_reads_per_partition'].present
+  ):
+    raise ValueError(
+        'Both --partition_size and --max_reads_per_partition must be set '
+        'together, or not at all.'
+    )

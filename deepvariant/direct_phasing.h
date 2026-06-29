@@ -63,8 +63,7 @@ namespace deepvariant {
 
 inline constexpr absl::string_view kUncalledAllele = "UNCALLED_ALLELE";
 
-// TODO Add an overflow check when read indices are generated.
-using ReadIndex = uint16_t;
+using ReadIndex = int;
 
 // Data type storing read id and mapping quality. It is used in AlleleInfo.
 struct ReadSupportInfo {
@@ -84,6 +83,7 @@ struct AlleleInfo {
   std::string bases = "";
   int phase = 0;
   std::vector<ReadSupportInfo> read_support;
+  bool is_first_in_block = false;
 };
 
 // Data structure to hold variant phases. It is only used for reporting.
@@ -91,6 +91,7 @@ struct PhasedVariant {
   int64_t position;
   std::string phase_1_bases;
   std::string phase_2_bases;
+  bool is_first_in_block = false;
 };
 
 inline bool operator==(const AlleleInfo& lhs, const AlleleInfo& rhs) {
@@ -106,6 +107,9 @@ inline bool operator==(const AlleleInfo& lhs, const AlleleInfo& rhs) {
 //              purposes.
 class DirectPhasing {
  public:
+  explicit DirectPhasing(const DirectPhasingOptions& options)
+      : options_(options) {}
+
   struct VertexInfo {
     AlleleInfo allele_info;
   };
@@ -241,7 +245,7 @@ class DirectPhasing {
 
   // Find all reads supporting starting_score partition and <vertex>.
   // Reads that start at <vertex> are also counted.
-  absl::flat_hash_set<ReadIndex> FindSupportingReads(
+  std::vector<absl::flat_hash_set<ReadIndex>> FindSupportingReads(
       const Vertex& vertex, const Score& starting_score, int phase) const;
 
   // Calculate phasing score for pair of vertices that end <edge1> and <edge2>
@@ -282,6 +286,7 @@ class DirectPhasing {
   bool HasAtLeastOneIncomingEdge(const std::vector<Vertex>& vertecies) const;
 
  private:
+  DirectPhasingOptions options_;
   BoostGraph graph_;
   RawVertexIndexMap vertex_index_map_;  // This is needed for GraphViz.
   absl::flat_hash_set<int> hom_positions_;
@@ -305,6 +310,7 @@ class DirectPhasing {
 
   // Map read name to read id.
   absl::flat_hash_map<std::string, ReadIndex> read_to_index_;
+  absl::flat_hash_map<ReadIndex, std::string> index_to_read_name_;
 
   // Graph Vizualization
   VertexIndexMap IndexMap() const;

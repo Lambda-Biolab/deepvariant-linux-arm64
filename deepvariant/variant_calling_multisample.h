@@ -49,6 +49,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "third_party/nucleus/protos/variants.pb.h"
@@ -89,6 +90,14 @@ extern const char* const kVAFFormatField;
 extern const char* const kMFFormatField;
 extern const char* const kMDFormatField;
 
+// Constants for:
+// NDP (depth in normal),
+// NAD (depth by allele in normal),
+// NAF (variant allele fraction in normal) format fields.
+extern const char* const kDPNormalFormatField;
+extern const char* const kADNormalFormatField;
+extern const char* const kVAFNormalFormatField;
+
 // Implements the less functionality needed to use an Allele as a key in a map.
 struct OrderAllele {
   bool operator()(const Allele& allele1, const Allele& allele2) const {
@@ -118,14 +127,18 @@ struct SelectAltAllelesInputOptions {
   int prev_deletion_end;  // This is the end position of the previous deletion.
   // It is used to skip complex variant creation for alleles that are
   // overlapped by the previous deletion.
+  bool use_rejected_alleles = false;
 };
 
 // Output options for SelectAltAlleles() function.
 struct SelectAltAllelesResult {
-  std::vector<Allele> alt_alleles;
+  std::vector<Allele> alt_alleles;  // Alt alleles for the target sample.
   absl::node_hash_map<std::string, AlleleCount> allele_counts_mod;
   bool complex_variant_created;
   std::string ref_bases;
+  std::vector<Allele> non_target_sample_alleles;
+  std::vector<AlleleCount> non_target_allele_counts;
+  std::vector<Allele> rejected_alleles;
 };
 
 // Input options for SelectAltAllelesWithComplexVariant() function.
@@ -133,6 +146,7 @@ struct SelectAltAllelesWithComplexVariantInputOptions {
   const absl::node_hash_map<std::string,
                             AlleleCount>& allele_counts_by_sample;
   const std::vector<Allele>& alt_alleles;
+  const std::vector<Allele>& rejected_alleles;
 };
 
 
@@ -224,14 +238,16 @@ class VariantCaller {
   std::vector<DeepVariantCall> CallsFromAlleleCounts(
       const std::unordered_map<std::string, AlleleCounter*>&
           allele_counters,
-      const std::string& target_sample);
+      const std::string& target_sample,
+      const std::string& target_role = "");
 
   // High-level API for calculating potential variant position in a region.
   // This function is almost identical to CallsFromAlleleCounts except it
   // only calculates candidate positions.
   std::vector<int> CallPositionsFromAlleleCounts(
       const std::unordered_map<std::string, AlleleCounter*>& allele_counters,
-      const std::string& target_sample);
+      const std::string& target_sample,
+      const std::string& target_role = "");
 
   // Iterates allele_counts for all samples and calls specified function F for
   // each candidate. Currently there are 2 use case: generate candidates,
@@ -263,6 +279,12 @@ class VariantCaller {
 
   // Adds supporting reads to the DeepVariantCall.
   void AddSupportingReads(
+      const absl::node_hash_map<std::string, AlleleCount>& allele_counts,
+      const AlleleMap& allele_map, absl::string_view target_sample,
+      DeepVariantCall* call) const;
+
+  // Adds supporting reads to the DeepVariantCall for rejected alleles.
+  void AddSupportingReadsForRejectedAlleles(
       const absl::node_hash_map<std::string, AlleleCount>& allele_counts,
       const AlleleMap& allele_map, absl::string_view target_sample,
       DeepVariantCall* call) const;
@@ -307,9 +329,11 @@ class VariantCaller {
   // Helper function to create a VariantCaller for testing.
   static std::unique_ptr<VariantCaller> MakeTestVariantCallerFromAlleleCounts(
       VariantCallerOptions options, absl::Span<const AlleleCount> allele_counts,
-      const std::string& sample_name) {
+      const std::string& sample_name,
+      const std::string& sample_role = "") {
     auto caller = std::make_unique<VariantCaller>(options);
     caller->target_sample_ = sample_name;
+    caller->target_role_ = sample_role;
     AlleleCounter* allele_counter =
         AlleleCounter::InitFromAlleleCounts(allele_counts);
     caller->allele_counters_per_sample_[sample_name] = allele_counter;
@@ -331,9 +355,20 @@ class VariantCaller {
                : options_.min_count_indels();
   }
   double min_fraction(const Allele& allele) const {
-    return allele.type() == AlleleType::SUBSTITUTION
-               ? options_.min_fraction_snps()
-               : options_.min_fraction_indels();
+    if (allele.type() == AlleleType::SUBSTITUTION) {
+      return options_.min_fraction_snps();
+    }
+    if (options_.vsc_small_indel_threshold() > 0 &&
+        options_.vsc_min_indel_fraction_for_small_indels() > 0.0 &&
+        options_.vsc_min_indel_fraction_for_large_indels() > 0.0) {
+      if (allele.bases().size() <= options_.vsc_small_indel_threshold() + 1) {
+        return options_.vsc_min_indel_fraction_for_small_indels();
+      } else {
+        return options_.vsc_min_indel_fraction_for_large_indels();
+      }
+    } else {
+      return options_.min_fraction_indels();
+    }
   }
 
   SelectAltAllelesResult SelectAltAlleles(
@@ -374,6 +409,8 @@ class VariantCaller {
   std::unordered_map<std::string, AlleleCounter*> allele_counters_per_sample_;
   // Name of the target sample for multi-allelic variant calling.
   std::string target_sample_;
+  // Role of the target sample for multi-allelic variant calling.
+  std::string target_role_;
 
   // Helper functions for methylation-aware phasing methylation merging
   // (PacBio only).
@@ -405,16 +442,9 @@ class VariantCaller {
               TestCallVariantAddAdjacentAlleleFractionsAtPositionSize0);
   FRIEND_TEST(VariantCallingTest, TestRefSitesFraction);
   FRIEND_TEST(VariantCallingTest, TestCallVariantNew);
+  FRIEND_TEST(IndelAlleleFractionTest, IndelAlleleFractionTestCases);
   friend class VariantCallingTest;
 };
-
-// Helper function
-// If there are multiple deletions with different anchors at the same location
-// this functions determines the deletions with the highest reads support and
-// deletes all other deletions from the allele_map. In all other cases
-// allele_map is not modified.
-AlleleMap RemoveInvalidDels(const AlleleMap& allele_map,
-                            absl::string_view ref_bases);
 
 }  // namespace multi_sample
 }  // namespace deepvariant

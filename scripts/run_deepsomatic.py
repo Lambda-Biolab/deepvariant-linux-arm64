@@ -35,12 +35,13 @@ using the binaries in the Docker image.
 """
 
 import enum
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from absl import app
 from absl import flags
@@ -153,6 +154,29 @@ _CUSTOMIZED_MODEL = flags.DEFINE_string(
     (
         'Optional. A path to a model checkpoint to load for the `call_variants`'
         ' step. If not set, the default for each --model_type will be used'
+    ),
+)
+_CUSTOMIZED_MODEL_JSON = flags.DEFINE_string(
+    'customized_model_json',
+    None,
+    (
+        'Optional. File path to a model.example_info.json to pair with'
+        ' --customized_model. If not set, we will use the'
+        ' model.example_info.json found in the model directory.'
+    ),
+)
+_DISABLE_SMALL_MODEL = flags.DEFINE_boolean(
+    'disable_small_model',
+    False,
+    'Optional. Disable the use of the small model to call variants during '
+    'the `make_examples` step.',
+)
+_CUSTOMIZED_SMALL_MODEL = flags.DEFINE_string(
+    'customized_small_model',
+    None,
+    (
+        'Optional. A path to a small model checkpoint to call variants during '
+        'the `make_examples` step.'
     ),
 )
 # Optional flags for make_examples_somatic.
@@ -292,7 +316,7 @@ MODEL_TYPE_MAP = {
 
 # Current release version of DeepVariant.
 # Should be the same in dv_vcf_constants.py.
-DEEP_VARIANT_VERSION = '1.9.0'
+DEEP_VARIANT_VERSION = '1.10.0'
 
 
 @enum.unique
@@ -393,12 +417,39 @@ def _update_kwargs_with_warning(kwargs, extra_args):
   return kwargs
 
 
+def _use_small_model(model_ckpt_json: Optional[str] = None) -> bool:
+  """Determines if the small model is enabled based on flags and model type."""
+  if _DISABLE_SMALL_MODEL.value:
+    return False
+  if _CUSTOMIZED_SMALL_MODEL.value:
+    return True
+  if model_ckpt_json and tf.io.gfile.exists(model_ckpt_json):
+    with tf.io.gfile.GFile(model_ckpt_json) as f:
+      info = json.load(f)
+      if info.get('flags_for_calling', {}).get('trained_small_model_path'):
+        return True
+  return False
+
+
+def _set_small_model_config(
+    special_args: Dict[str, Any],
+    customized_small_model: str | None,
+    model_ckpt_json: str | None,
+) -> None:
+  """Sets small model config parameters."""
+  if not _use_small_model(model_ckpt_json):
+    return
+  special_args['call_small_model_examples'] = True
+  special_args['trained_small_model_path'] = customized_small_model
+
+
 def make_examples_somatic_command(
     ref,
     reads_tumor,
     reads_normal,
     examples,
     model_ckpt,
+    model_ckpt_json,
     extra_args,
     candidate_positions_path,
     candidate_partition_mode=None,
@@ -413,6 +464,7 @@ def make_examples_somatic_command(
     reads_normal: Input normal BAM file.
     examples: Output tfrecord file containing tensorflow.Example files.
     model_ckpt: Path to the TensorFlow model checkpoint.
+    model_ckpt_json: Path to the model.example_info.json file.
     extra_args: Comma-separated list of flag_name=flag_value.
     candidate_positions_path: Path to candidate positions file.
     candidate_partition_mode: If set adds extra parameters to allow candidate
@@ -447,158 +499,15 @@ def make_examples_somatic_command(
     command.extend(['--reads_normal', '"{}"'.format(reads_normal)])
   command.extend(['--examples', '"{}"'.format(examples)])
   command.extend(['--checkpoint', '"{}"'.format(model_ckpt)])
+  if model_ckpt_json:
+    command.extend(['--checkpoint_json', '"{}"'.format(model_ckpt_json)])
 
   if runtime_by_region_path is not None:
     command.extend(
         ['--runtime_by_region', '"{}"'.format(runtime_by_region_path)]
     )
 
-  if _MODEL_TYPE.value == 'WGS':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.05
-    special_args['vsc_min_fraction_snps'] = 0.029
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.5
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.5
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'WGS_TUMOR_ONLY':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.07
-    special_args['vsc_min_fraction_snps'] = 0.05
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.5
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.5
-    special_args['population_vcfs'] = (
-        '/opt/models/deepsomatic/pons/AF_ilmn_PON_DeepVariant.GRCh38.AF0.05.vcf.gz'
-    )
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'WES':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.05
-    special_args['vsc_min_fraction_snps'] = 0.029
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.5
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.5
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'WES_TUMOR_ONLY':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.07
-    special_args['vsc_min_fraction_snps'] = 0.05
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.5
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.5
-    special_args['population_vcfs'] = (
-        '/opt/models/deepsomatic/pons/AF_ilmn_PON_DeepVariant.GRCh38.AF0.05.vcf.gz'
-    )
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'FFPE_WGS':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.05
-    special_args['vsc_min_fraction_snps'] = 0.029
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'FFPE_WES':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.05
-    special_args['vsc_min_fraction_snps'] = 0.029
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'FFPE_WGS_TUMOR_ONLY':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.07
-    special_args['vsc_min_fraction_snps'] = 0.05
-    special_args['population_vcfs'] = (
-        '/opt/models/deepsomatic/pons/AF_ilmn_PON_DeepVariant.GRCh38.AF0.05.vcf.gz'
-    )
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'FFPE_WES_TUMOR_ONLY':
-    # Specific flags that are not default can be added here.
-    special_args = {}
-    special_args['vsc_min_fraction_indels'] = 0.07
-    special_args['vsc_min_fraction_snps'] = 0.05
-    special_args['population_vcfs'] = (
-        '/opt/models/deepsomatic/pons/AF_ilmn_PON_DeepVariant.GRCh38.AF0.05.vcf.gz'
-    )
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'PACBIO':
-    special_args = {}
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['min_mapping_quality'] = 5
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 147
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.5
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.5
-    special_args['vsc_min_count_snps'] = 1
-    special_args['vsc_min_fraction_indels'] = 0.1
-    special_args['vsc_min_fraction_snps'] = 0.02
-    special_args['trim_reads_for_pileup'] = True
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'PACBIO_TUMOR_ONLY':
-    special_args = {}
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['min_mapping_quality'] = 5
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 99
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.5
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.5
-    special_args['vsc_min_count_snps'] = 1
-    special_args['vsc_min_fraction_indels'] = 0.1
-    special_args['vsc_min_fraction_snps'] = 0.02
-    special_args['trim_reads_for_pileup'] = True
-    special_args['population_vcfs'] = (
-        '/opt/models/deepsomatic/pons/AF_pacbio_PON_CoLoRSdb.GRCh38.AF0.05.vcf.gz'
-    )
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'ONT':
-    special_args = {}
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['min_mapping_quality'] = 5
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 99
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.6
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.6
-    special_args['vsc_min_fraction_snps'] = 0.05
-    special_args['vsc_min_fraction_indels'] = 0.1
-    special_args['trim_reads_for_pileup'] = True
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  elif _MODEL_TYPE.value == 'ONT_TUMOR_ONLY':
-    special_args = {}
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['min_mapping_quality'] = 5
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 99
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_max_fraction_indels_for_non_target_sample'] = 0.6
-    special_args['vsc_max_fraction_snps_for_non_target_sample'] = 0.6
-    special_args['vsc_min_fraction_snps'] = 0.05
-    special_args['vsc_min_fraction_indels'] = 0.1
-    special_args['trim_reads_for_pileup'] = True
-    special_args['population_vcfs'] = (
-        '/opt/models/deepsomatic/pons/AF_pacbio_PON_CoLoRSdb.GRCh38.AF0.05.vcf.gz'
-    )
-    kwargs = _update_kwargs_with_warning(kwargs, special_args)
-  else:
-    raise ValueError('Invalid model_type: %s' % _MODEL_TYPE.value)
+  special_args = {}
 
   if candidate_partition_mode:
     # We don't set a different partition size for sweep mode.
@@ -606,6 +515,10 @@ def make_examples_somatic_command(
     special_args['candidate_positions'] = candidate_positions_path
     special_args['max_reads_per_partition'] = 0
     special_args['max_reads_for_dynamic_bases_per_region'] = 1500
+
+  _set_small_model_config(
+      special_args, _CUSTOMIZED_SMALL_MODEL.value, model_ckpt_json
+  )
 
   if special_args:
     kwargs = _update_kwargs_with_warning(kwargs, special_args)
@@ -656,9 +569,11 @@ def postprocess_variants_command(
     ref: str,
     infile: str,
     outfile: str,
+    small_model_cvo_records: str,
     process_somatic: bool,
     pon_filtering: str,
     extra_args: str,
+    model_ckpt_json: Optional[str] = None,
     **kwargs,
 ) -> tuple[str, Optional[str]]:
   """Returns a postprocess_variants (command, logfile) for subprocess."""
@@ -671,11 +586,17 @@ def postprocess_variants_command(
   else:
     command.extend(['--noprocess_somatic'])
 
+  if _use_small_model(model_ckpt_json):
+    command.extend(
+        ['--small_model_cvo_records', '"{}"'.format(small_model_cvo_records)]
+    )
+
   # Use this if-else block only for PON filtering.
   if pon_filtering:
     command.extend(['--pon_filtering', '"{}"'.format(pon_filtering)])
   elif (
       _MODEL_TYPE.value == 'WGS_TUMOR_ONLY'
+      or _MODEL_TYPE.value == 'WES_TUMOR_ONLY'
       or _MODEL_TYPE.value == 'FFPE_WGS_TUMOR_ONLY'
       or _MODEL_TYPE.value == 'FFPE_WES_TUMOR_ONLY'
   ):
@@ -769,24 +690,19 @@ def check_or_create_intermediate_results_dir(
 def check_flags():
   """Additional logic to make sure flags are set appropriately."""
   if _CUSTOMIZED_MODEL.value is not None:
-    if (
-        # SavedModel path does not exist.
-        not tf.io.gfile.exists(
-            os.path.join(_CUSTOMIZED_MODEL.value, 'saved_model.pb')
-        )
-        and
-        # Checkpoint path does not exist.
-        (
-            not tf.io.gfile.exists(
-                _CUSTOMIZED_MODEL.value + '.data-00000-of-00001'
-            )
-            or not tf.io.gfile.exists(_CUSTOMIZED_MODEL.value + '.index')
-        )
-    ):
+    use_saved_model = tf.io.gfile.exists(
+        _CUSTOMIZED_MODEL.value
+    ) and tf.io.gfile.exists(f'{_CUSTOMIZED_MODEL.value}/saved_model.pb')
+
+    if use_saved_model:
+      logging.info('Using saved model: %s', str(use_saved_model))
+    elif not tf.io.gfile.exists(
+        _CUSTOMIZED_MODEL.value + '.data-00000-of-00001'
+    ) or not tf.io.gfile.exists(_CUSTOMIZED_MODEL.value + '.index'):
       raise RuntimeError(
           'The model files {}* do not exist. Potentially '
           'relevant issue: '
-          'https://github.com/google/deepvariant/blob/r1.9/docs/'
+          'https://github.com/google/deepvariant/blob/r1.10/docs/'
           'FAQ.md#why-cant-it-find-one-of-the-input-files-eg-'
           'could-not-open'.format(_CUSTOMIZED_MODEL.value)
       )
@@ -799,6 +715,28 @@ def check_flags():
         _MODEL_TYPE.value,
         _CUSTOMIZED_MODEL.value,
     )
+    if tf.io.gfile.isdir(_CUSTOMIZED_MODEL.value):
+      model_dir = _CUSTOMIZED_MODEL.value
+    else:
+      model_dir = os.path.dirname(_CUSTOMIZED_MODEL.value)
+
+    # Check if model.example_info.json exists in the model directory
+    # or if the user provided a customized json file.
+    json_in_model_dir = tf.io.gfile.exists(
+        f'{model_dir}/model.example_info.json'
+    )
+    custom_json_exists = _CUSTOMIZED_MODEL_JSON.value and tf.io.gfile.exists(
+        _CUSTOMIZED_MODEL_JSON.value
+    )
+
+    if not json_in_model_dir and not custom_json_exists:
+      raise RuntimeError(
+          'Starting from v1.10.0, the model file needs to have a corresponding'
+          ' model.example_info.json file. You can see'
+          f' gs://deepvariant/models/DeepVariant/{DEEP_VARIANT_VERSION}/savedmodels/deepvariant.*.savedmodel/model.example_info.json'
+          ' as examples. The best way is to consult the people who trained the'
+          ' model to understand what flags should be used for make_examples.'
+      )
 
 
 def get_model_ckpt(model_type, customized_model):  # pylint: disable=unused-argument
@@ -865,6 +803,16 @@ def create_all_commands_and_logfiles(
 
   model_ckpt = get_model_ckpt(_MODEL_TYPE.value, _CUSTOMIZED_MODEL.value)
 
+  model_ckpt_json = _CUSTOMIZED_MODEL_JSON.value
+  if not model_ckpt_json:
+    if tf.io.gfile.isdir(model_ckpt):
+      model_dir = model_ckpt
+    else:
+      model_dir = os.path.dirname(model_ckpt)
+    potential_json = f'{model_dir}/model.example_info.json'
+    if tf.io.gfile.exists(potential_json):
+      model_ckpt_json = potential_json
+
   for candidate_partition_mode in candidate_partition_modes:
     commands.append(
         make_examples_somatic_command(
@@ -873,6 +821,7 @@ def create_all_commands_and_logfiles(
             reads_normal=_READS_NORMAL.value,
             examples=examples,
             model_ckpt=model_ckpt,
+            model_ckpt_json=model_ckpt_json,
             runtime_by_region_path=runtime_by_region_path,
             extra_args=_MAKE_EXAMPLES_EXTRA_ARGS.value,
             candidate_positions_path=_candidate_positions_common_name(
@@ -903,14 +852,22 @@ def create_all_commands_and_logfiles(
   )
 
   # postprocess_variants
+  small_model_cvo_records = os.path.join(
+      intermediate_results_dir,
+      'make_examples_somatic_call_variant_outputs.tfrecord@{}.gz'.format(
+          _NUM_SHARDS.value
+      ),
+  )
   commands.append(
       postprocess_variants_command(
           ref=_REF.value,
           infile=call_variants_output,
           outfile=_OUTPUT_VCF.value,
+          small_model_cvo_records=small_model_cvo_records,
           process_somatic=_PROCESS_SOMATIC.value,
           pon_filtering=_PON_FILTERING.value,
           extra_args=_POSTPROCESS_VARIANTS_EXTRA_ARGS.value,
+          model_ckpt_json=model_ckpt_json,
           nonvariant_site_tfrecord_path=nonvariant_site_tfrecord_path,
           gvcf_outfile=_OUTPUT_GVCF.value,
       )

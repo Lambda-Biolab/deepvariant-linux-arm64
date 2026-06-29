@@ -292,6 +292,17 @@ _USE_CANDIDATE_PARTITION = flags.DEFINE_boolean(
         ' memory usage.'
     ),
 )
+_EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES = flags.DEFINE_list(
+    'emit_vcf_by_small_model_gq_values',
+    None,
+    '[Experimental] When set as a list of integers, DeepTrio classifies all'
+    ' candidates using both small and CNN models. It then generates separate'
+    ' VCF files for each specified GQ (Genotype Quality) threshold by'
+    ' initiating multiple post-processing jobs. This experimental feature aims'
+    ' to analyze the combined accuracy of the two models across different GQ'
+    ' thresholds for all samples.',
+)
+
 
 # Optional flags for postprocess_variants.
 _OUTPUT_GVCF_CHILD = flags.DEFINE_string(
@@ -342,20 +353,32 @@ class SmallModelConfig:
 
 SMALL_MODEL_CONFIG_BY_MODEL_TYPE = {
     'WGS': SmallModelConfig(
-        small_model_path_child='/opt/smallmodels/deeptrio/wgs/child',
-        small_model_path_parent='/opt/smallmodels/deeptrio/wgs/parent',
+        small_model_path_child=(
+            '/opt/smallmodels/deeptrio/wgs/child/model.keras'
+        ),
+        small_model_path_parent=(
+            '/opt/smallmodels/deeptrio/wgs/parent/model.keras'
+        ),
         indel_gq_threshold=29,
         snp_gq_threshold=15,
     ),
     'PACBIO': SmallModelConfig(
-        small_model_path_child='/opt/smallmodels/deeptrio/pacbio/child',
-        small_model_path_parent='/opt/smallmodels/deeptrio/pacbio/parent',
+        small_model_path_child=(
+            '/opt/smallmodels/deeptrio/pacbio/child/model.keras'
+        ),
+        small_model_path_parent=(
+            '/opt/smallmodels/deeptrio/pacbio/parent/model.keras'
+        ),
         indel_gq_threshold=25,
         snp_gq_threshold=20,
     ),
     'ONT': SmallModelConfig(
-        small_model_path_child='/opt/smallmodels/deeptrio/ont/child',
-        small_model_path_parent='/opt/smallmodels/deeptrio/ont/parent',
+        small_model_path_child=(
+            '/opt/smallmodels/deeptrio/ont/child/model.keras'
+        ),
+        small_model_path_parent=(
+            '/opt/smallmodels/deeptrio/ont/parent/model.keras'
+        ),
         indel_gq_threshold=10,
         snp_gq_threshold=15,
     ),
@@ -363,7 +386,7 @@ SMALL_MODEL_CONFIG_BY_MODEL_TYPE = {
 
 # Current release version of DeepTrio.
 # Should be the same in dv_vcf_constants.py.
-DEEP_TRIO_VERSION = '1.9.0'
+DEEP_TRIO_VERSION = '1.10.0'
 GLNEXUS_VERSION = 'v1.2.7'
 
 DEEP_TRIO_WGS_PILEUP_HEIGHT_CHILD = 60
@@ -538,6 +561,19 @@ def _set_small_model_config(
     special_args['small_model_path_parent'] = config.small_model_path_parent
     special_args['small_model_snp_gq_threshold'] = config.snp_gq_threshold
     special_args['small_model_indel_gq_threshold'] = config.indel_gq_threshold
+  if _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+    special_args['small_model_emit_all_candidates'] = True
+
+
+def _rename_vcf_file_by_gq(
+    vcf_file: str,
+    gq_threshold: int | str,
+) -> str:
+  """Renames a VCF file by adding a suffix with the GQ threshold."""
+  if vcf_file.endswith('.vcf.gz'):
+    return vcf_file.replace('.vcf.gz', f'_gq_{gq_threshold}.vcf.gz')
+  else:
+    return f'{vcf_file}_gq_{gq_threshold}.vcf.gz'
 
 
 def _make_examples_command(
@@ -751,6 +787,7 @@ def postprocess_variants_command(
     extra_args,
     nonvariant_site_tfrecord_path=None,
     gvcf_outfile=None,
+    **kwargs,
 ):
   """Returns a postprocess_variants command for subprocess.check_call."""
   command = ['time', '/opt/deepvariant/bin/postprocess_variants']
@@ -764,16 +801,17 @@ def postprocess_variants_command(
     command.extend(
         ['--small_model_cvo_records', '"{}"'.format(small_model_cvo_records)]
     )
-  if nonvariant_site_tfrecord_path is not None:
+  if nonvariant_site_tfrecord_path is not None and gvcf_outfile is not None:
     command.extend([
         '--nonvariant_site_tfrecord_path',
         '"{}"'.format(nonvariant_site_tfrecord_path),
     ])
     command.extend(['--gvcf_outfile', '"{}"'.format(gvcf_outfile)])
   # Extend the command with all items in extra_args.
-  command = _extend_command_by_args_dict(
-      command, _extra_args_to_dict(extra_args)
-  )
+  kwargs = _update_kwargs_with_warning(kwargs, _extra_args_to_dict(extra_args))
+  command = _extend_command_by_args_dict(command, kwargs)
+  if _MODEL_TYPE.value == 'WES':
+    command.extend(['--multiallelic_mode "min"'])
   if _LOGGING_DIR.value:
     command.extend(
         [
@@ -853,7 +891,7 @@ def check_flags():
       raise RuntimeError(
           'The model files {}* do not exist. Potentially '
           'relevant issue: '
-          'https://github.com/google/deepvariant/blob/r1.9/docs/'
+          'https://github.com/google/deepvariant/blob/r1.10/docs/'
           'FAQ.md#why-cant-it-find-one-of-the-input-files-eg-'
           'could-not-open'.format(_CUSTOMIZED_MODEL_PARENT.value)
       )
@@ -872,7 +910,7 @@ def check_flags():
       raise RuntimeError(
           'The model files {}* do not exist. Potentially '
           'relevant issue: '
-          'https://github.com/google/deepvariant/blob/r1.9/docs/'
+          'https://github.com/google/deepvariant/blob/r1.10/docs/'
           'FAQ.md#why-cant-it-find-one-of-the-input-files-eg-'
           'could-not-open'.format(_CUSTOMIZED_MODEL_CHILD.value)
       )
@@ -917,7 +955,12 @@ def generate_call_variants_command(
 
 
 def generate_postprocess_variants_command(
-    sample, intermediate_results_dir, output_vcf, output_gvcf, extra_args=None
+    sample,
+    intermediate_results_dir,
+    output_vcf,
+    output_gvcf=None,
+    extra_args=None,
+    **kwargs,
 ):
   """Helper function to generate post_process command line."""
   return postprocess_variants_command(
@@ -943,6 +986,7 @@ def generate_postprocess_variants_command(
           examples_common_suffix(_NUM_SHARDS.value),
       ),
       gvcf_outfile=output_gvcf,
+      **kwargs,
   )
 
 
@@ -1052,49 +1096,88 @@ def create_all_commands(intermediate_results_dir):
     )
 
   # postprocess_variants for child
-  post_process_commands.append(
-      generate_postprocess_variants_command(
-          CHILD,
-          intermediate_results_dir,
-          _OUTPUT_VCF_CHILD.value,
-          _OUTPUT_GVCF_CHILD.value,
-          _POSTPROCESS_VARIANTS_CHILD_EXTRA_ARGS.value,
+  if _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+    for gq in _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+      post_process_commands.append(
+          generate_postprocess_variants_command(
+              CHILD,
+              intermediate_results_dir,
+              _rename_vcf_file_by_gq(_OUTPUT_VCF_CHILD.value, gq),
+              extra_args=_POSTPROCESS_VARIANTS_CHILD_EXTRA_ARGS.value,
+              resolve_call_variants_outputs_by_model=True,
+              small_model_gq_threshold=gq,
+          )
       )
-  )
-  if _VCF_STATS_REPORT.value:
-    report_commands.append(
-        vcf_stats_report_command(vcf_path=_OUTPUT_VCF_CHILD.value)
+  else:
+    post_process_commands.append(
+        generate_postprocess_variants_command(
+            CHILD,
+            intermediate_results_dir,
+            _OUTPUT_VCF_CHILD.value,
+            _OUTPUT_GVCF_CHILD.value,
+            _POSTPROCESS_VARIANTS_CHILD_EXTRA_ARGS.value,
+        )
     )
+    if _VCF_STATS_REPORT.value:
+      report_commands.append(
+          vcf_stats_report_command(vcf_path=_OUTPUT_VCF_CHILD.value)
+      )
 
   if _READS_PARENT1.value is not None:
-    post_process_commands.append(
-        generate_postprocess_variants_command(
-            PARENT1,
-            intermediate_results_dir,
-            _OUTPUT_VCF_PARENT1.value,
-            _OUTPUT_GVCF_PARENT1.value,
-            _POSTPROCESS_VARIANTS_PARENT1_EXTRA_ARGS.value,
+    if _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+      for gq in _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+        post_process_commands.append(
+            generate_postprocess_variants_command(
+                PARENT1,
+                intermediate_results_dir,
+                _rename_vcf_file_by_gq(_OUTPUT_VCF_PARENT1.value, gq),
+                extra_args=_POSTPROCESS_VARIANTS_PARENT1_EXTRA_ARGS.value,
+                resolve_call_variants_outputs_by_model=True,
+                small_model_gq_threshold=gq,
+            )
         )
-    )
-    if _VCF_STATS_REPORT.value:
-      report_commands.append(
-          vcf_stats_report_command(vcf_path=_OUTPUT_VCF_PARENT1.value)
+    else:
+      post_process_commands.append(
+          generate_postprocess_variants_command(
+              PARENT1,
+              intermediate_results_dir,
+              _OUTPUT_VCF_PARENT1.value,
+              _OUTPUT_GVCF_PARENT1.value,
+              _POSTPROCESS_VARIANTS_PARENT1_EXTRA_ARGS.value,
+          )
       )
+      if _VCF_STATS_REPORT.value:
+        report_commands.append(
+            vcf_stats_report_command(vcf_path=_OUTPUT_VCF_PARENT1.value)
+        )
 
   if _READS_PARENT2.value is not None:
-    post_process_commands.append(
-        generate_postprocess_variants_command(
-            PARENT2,
-            intermediate_results_dir,
-            _OUTPUT_VCF_PARENT2.value,
-            _OUTPUT_GVCF_PARENT2.value,
-            _POSTPROCESS_VARIANTS_PARENT2_EXTRA_ARGS.value,
+    if _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+      for gq in _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+        post_process_commands.append(
+            generate_postprocess_variants_command(
+                PARENT2,
+                intermediate_results_dir,
+                _rename_vcf_file_by_gq(_OUTPUT_VCF_PARENT2.value, gq),
+                extra_args=_POSTPROCESS_VARIANTS_PARENT2_EXTRA_ARGS.value,
+                resolve_call_variants_outputs_by_model=True,
+                small_model_gq_threshold=gq,
+            )
         )
-    )
-    if _VCF_STATS_REPORT.value:
-      report_commands.append(
-          vcf_stats_report_command(vcf_path=_OUTPUT_VCF_PARENT2.value)
+    else:
+      post_process_commands.append(
+          generate_postprocess_variants_command(
+              PARENT2,
+              intermediate_results_dir,
+              _OUTPUT_VCF_PARENT2.value,
+              _OUTPUT_GVCF_PARENT2.value,
+              _POSTPROCESS_VARIANTS_PARENT2_EXTRA_ARGS.value,
+          )
       )
+      if _VCF_STATS_REPORT.value:
+        report_commands.append(
+            vcf_stats_report_command(vcf_path=_OUTPUT_VCF_PARENT2.value)
+        )
 
   # runtime-by-region
   if _LOGGING_DIR.value and _RUNTIME_REPORT.value:
@@ -1131,7 +1214,11 @@ def run_commands(
       if not dry_run:
         try:
           subprocess.check_call(
-              command, shell=True, executable='/bin/bash', env=env
+              command,
+              shell=True,
+              executable='/bin/bash',
+              env=env,
+              stderr=subprocess.STDOUT,
           )
         except subprocess.CalledProcessError as e:
           logging.info(e.output)
@@ -1141,7 +1228,13 @@ def run_commands(
       print('\n***** Running the command:*****\n{}\n'.format(command))
     if not _DRY_RUN.value:
       tasks = [
-          subprocess.Popen(command, shell=True, executable='/bin/bash', env=env)
+          subprocess.Popen(
+              command,
+              shell=True,
+              executable='/bin/bash',
+              env=env,
+              stderr=subprocess.STDOUT,
+          )
           for command in commands
       ]
       failed_task_indices = [
