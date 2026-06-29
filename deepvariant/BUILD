@@ -1069,6 +1069,8 @@ cc_library(
     deps = [
         "//deepvariant/protos:deepvariant_cc_pb2",
         "@com_google_absl//absl/log",
+    ],
+)
 
 cc_test(
     name = "sampling_util_test",
