@@ -312,6 +312,61 @@ Full build: several hours on an 8-core machine (~2273 Bazel actions).
 
 ---
 
+## GPU Acceleration (NVIDIA CUDA)
+
+A GPU-accelerated Docker image is available for ARM64+CUDA platforms. It uses NVIDIA's TF 2.16.1 CUDA wheel (JetPack 6) on `nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04`.
+
+### Supported platforms
+
+| Platform | GPU | Compute Capability | Status |
+|----------|-----|-------------------|--------|
+| NVIDIA DGX Spark | GB10 Blackwell | sm_121 | PTX JIT (compute_87 < 121) |
+| NVIDIA Jetson Orin | Ampere | sm_87 | Native |
+| NVIDIA A100/A10/A40 | Ampere | sm_80/86 | Native |
+| AWS g5g (T4G) | Turing | sm_75 | Not supported (sm_75 not compiled) |
+
+### Building the CUDA image
+
+```bash
+# On an ARM64 host with Docker (build doesn't need GPU):
+docker build -f docker/Dockerfile.arm64.cuda -t deepvariant-arm64-cuda .
+```
+
+### Running with GPU
+
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host:
+
+```bash
+docker run --gpus all \
+  -v /path/to/data:/data \
+  deepvariant-arm64-cuda \
+  /opt/deepvariant/bin/run_deepvariant \
+  --model_type=WGS \
+  --ref=/data/reference.fasta \
+  --reads=/data/input.bam \
+  --output_variants=/data/output.vcf.gz \
+  --num_shards=$(nproc)
+```
+
+### Verifying GPU detection
+
+```bash
+docker run --gpus all deepvariant-arm64-cuda python3 -c "
+import tensorflow as tf
+print('GPU devices:', tf.config.list_physical_devices('GPU'))
+print('CUDA build:', tf.sysconfig.get_build_info()['is_cuda_build'])
+"
+```
+
+### Notes
+
+- TF SavedModel inference uses GPU automatically when `--gpus all` is passed.
+- ONNX Runtime falls back to CPUExecutionProvider (no aarch64 `onnxruntime-gpu` wheel exists yet).
+- TensorRT is not installed (TF-TRT warning is harmless).
+- The `docker_entrypoint.sh` autoconfig detects GPU and skips BF16/INT8 CPU optimizations.
+
+---
+
 ## Roadmap
 
 - [x] Native ARM64 build + Docker image
@@ -325,6 +380,8 @@ Full build: several hours on an 8-core machine (~2273 Bazel actions).
 - [x] Full 30x WGS end-to-end validation — INT8 ONNX, all chromosomes (SNP F1=0.9961, INDEL F1=0.9956, 2h17m on Graviton4)
 - [x] WES model validation on ARM64 — INT8 ONNX, IDT exome 100x (SNP F1=0.9931, INDEL F1=0.9738)
 - [x] Nextflow / Snakemake integration with platform profiles
-- [ ] Edge device validation (Jetson, RK3588)
+- [x] GPU CUDA Docker image (NVIDIA TF 2.16.1, JetPack 6) — DGX Spark, Jetson Orin
+- [ ] GPU benchmark on DGX Spark / Jetson Orin
+- [ ] Edge device validation (RK3588)
 
 > For long-read ONT or PacBio data, see [Clair3](https://github.com/HKU-BAL/Clair3).
