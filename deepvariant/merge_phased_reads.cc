@@ -38,7 +38,9 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -179,14 +181,14 @@ void Merger::GroupReads() {
 
 // Returns true if number of reads with mismatched phases are greater than
 // number of reads with matching phases.
-bool Merger::CompareGroups(const ShardRegion& group_1,
-                           const ShardRegion& group_2) const {
+Merger::ComparisonResult Merger::CompareGroups(
+    const ShardRegion& group_1, const ShardRegion& group_2) const {
   int num_reads_not_matching_phase = 0;
   int num_reads_matching_phase = 0;
   auto group_1_it = groups_.find(group_1);
   auto group_2_it = groups_.find(group_2);
   if (group_1_it == groups_.end() || group_2_it == groups_.end()) {
-    return false;
+    return ComparisonResult::NOT_ENOUGH_OVERLAP;
   }
   // Iterate read ids in group_2.
   for (auto [merged_reads_idx_2, unmerged_reads_idx2] :
@@ -215,7 +217,12 @@ bool Merger::CompareGroups(const ShardRegion& group_1,
       num_reads_matching_phase++;
     }
   }
-  return num_reads_not_matching_phase > num_reads_matching_phase;
+  if (std::abs(num_reads_not_matching_phase - num_reads_matching_phase) < 2) {
+    return ComparisonResult::NOT_ENOUGH_OVERLAP;
+  }
+  return num_reads_not_matching_phase > num_reads_matching_phase
+             ? ComparisonResult::SWITCH
+             : ComparisonResult::MATCH;
 }
 
 // Reverses phase for the group. Phases are reversed as follow:
@@ -253,7 +260,11 @@ void Merger::MergeGroup(const ShardRegion& group) {
 //    merged. If most phases are not matched then phase is reversed for the
 //    group.
 // 3. Group is merged into merged_reads_.
-void Merger::MergeReads() {
+void Merger::MergeReads(absl::string_view switches_output_path) {
+  std::ofstream csv_file_switches;
+  if (!switches_output_path.empty()) {
+    csv_file_switches.open(std::string(switches_output_path));
+  }
   GroupReads();
   int cur_region = 1;
   int processed_groups = 0;
@@ -264,8 +275,14 @@ void Merger::MergeReads() {
       if (cur_group_it == groups_.end()) {
         continue;
       }
-      if (CompareGroups(prev_group, {shard, cur_region})) {
+      const ComparisonResult comparison_result =
+          CompareGroups(prev_group, {shard, cur_region});
+      if (comparison_result == ComparisonResult::SWITCH) {
         ReversePhasing({shard, cur_region});
+      }
+      if (csv_file_switches.is_open()) {
+        csv_file_switches << shard << "\t" << cur_region << "\t"
+                          << static_cast<int>(comparison_result) << "\n";
       }
       MergeGroup({shard, cur_region});
       processed_groups++;
@@ -274,6 +291,7 @@ void Merger::MergeReads() {
     }
     cur_region++;
   }
+  csv_file_switches.close();
 }
 
 void MergerPeer::SetUnmergedReads(

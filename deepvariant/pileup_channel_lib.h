@@ -63,6 +63,8 @@ static const auto& ch_base_quality = "base_quality";
 static const auto& ch_mapping_quality = "mapping_quality";
 static const auto& ch_strand = "strand";
 static const auto& ch_read_supports_variant = "read_supports_variant";
+static const auto& ch_read_supports_variant_fuzzy =
+    "read_supports_variant_fuzzy";
 static const auto& ch_base_differs_from_ref = "base_differs_from_ref";
 
 //--------------------//
@@ -91,6 +93,14 @@ static const auto& ch_base_channels_alternate_allele_2 =
 static const auto& ch_mean_coverage = "mean_coverage";
 static const auto& ch_base_methylation = "base_methylation";
 static const auto& ch_base_6ma = "base_6ma";
+static const auto& ch_supplementary_alignment = "supplementary_alignment";
+static const auto& ch_allele_sample_probability = "allele_sample_probability";
+static const auto& ch_homopolymer_insertion_quality =
+    "homopolymer_insertion_quality";
+static const auto& ch_homopolymer_deletion_quality =
+    "homopolymer_deletion_quality";
+static const auto& ch_inter_homopolymer_insertion_quality =
+    "inter_homopolymer_insertion_quality";
 
 //-------------------//
 // Channels Accessor //
@@ -104,6 +114,7 @@ static const constexpr int MaxGapCompressedIdentity = 100;
 static const constexpr int MaxGcContent = 100;
 static const constexpr int MaxIsHomoPolymer = 1;
 static const constexpr int MaxHomoPolymerWeighted = 30;
+static const constexpr int MaxHomoPolymerQuality = 93;
 
 //-------//
 // Utils //
@@ -136,9 +147,6 @@ class Channels {
   std::unique_ptr<Channel> ChannelEnumToObject(
       DeepVariantChannelEnum channel_enum, int width,
       const learning::genomics::deepvariant::PileupImageOptions& options);
-
-  // Scales an input value to pixel range 0-254.
-  std::uint8_t ScaleColor(int value, float max_val);
 
   // Scales an input vector to pixel range 0-254
   std::vector<std::uint8_t> ScaleColorVector(

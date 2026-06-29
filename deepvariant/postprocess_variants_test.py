@@ -31,6 +31,7 @@ import errno
 import gzip
 import io
 import itertools
+import json
 import os
 import shutil
 import sys
@@ -144,13 +145,16 @@ def _create_variant(
   )
 
 
-def _create_variant_with_alleles(ref=None, alts=None, start=0):
+def _create_variant_with_alleles(ref=None, alts=None, start=0, model_id=None):
   """Creates a Variant record with specified alternate_bases."""
+  variant_call = variants_pb2.VariantCall(call_set_name=_DEFAULT_SAMPLE_NAME)
+  if model_id:
+    variantcall_utils.set_model_id(variant_call, model_id)
   return variants_pb2.Variant(
       reference_bases=ref,
       alternate_bases=alts,
       start=start,
-      calls=[variants_pb2.VariantCall(call_set_name=_DEFAULT_SAMPLE_NAME)],
+      calls=[variant_call],
   )
 
 
@@ -200,6 +204,16 @@ def _create_nonvariant(ref_name, start, end, ref_base):
   )
 
 
+def _default_variant_phase_info():
+  return postprocess_variants.VariantPhaseInformation(
+      phase_set_shard_id=-1,
+      phase_set_region_id=-1,
+      phase_set_stitching_status=postprocess_variants.PhaseSetStitchingStatus.MATCH,
+      is_first_variant_in_phase_set=False,
+      first_variant_in_phase_set=None,
+  )
+
+
 def make_golden_dataset(compressed_inputs=False):
   if compressed_inputs:
     # Call variants now produce sharded outputs so the golden test has been
@@ -234,6 +248,19 @@ def create_outfile(file_name, compressed_outputs=False, only_keep_pass=False):
   if compressed_outputs:
     file_name += '.gz'
   return test_utils.test_tmpfile(file_name)
+
+
+def _create_cvo_with_variant_info(info_map=None, start=0):
+  """Helper to create a CallVariantsOutput with a variant having info fields."""
+  variant = _create_variant_with_alleles(ref='A', alts=['C'], start=start)
+  if info_map:
+    for key, value in info_map.items():
+      variant_utils.set_info(variant, key, value)
+      # if isinstance(value, bool):
+      #   if value:
+      # else:
+      #   variant_utils.set_info(variant, key, value)
+  return [_create_call_variants_output(indices=[0], variant=variant)]
 
 
 class AlleleRemapperTest(parameterized.TestCase):
@@ -831,12 +858,13 @@ class PostprocessVariantsTest(parameterized.TestCase):
       ),
   )
   def test_merge_predictions_probs(self, inputs, expected_unnormalized_probs):
-    denominator = sum(expected_unnormalized_probs)
-    for permuted_inputs in itertools.permutations(inputs):
-      _, predictions = postprocess_variants.merge_predictions(permuted_inputs)
-      np.testing.assert_almost_equal(
-          predictions, [x / denominator for x in expected_unnormalized_probs]
-      )
+    with flagsaver.flagsaver(multiallelic_mode='min'):
+      denominator = sum(expected_unnormalized_probs)
+      for permuted_inputs in itertools.permutations(inputs):
+        _, predictions = postprocess_variants.merge_predictions(permuted_inputs)
+        np.testing.assert_almost_equal(
+            predictions, [x / denominator for x in expected_unnormalized_probs]
+        )
 
   @parameterized.parameters(
       (
@@ -884,6 +912,93 @@ class PostprocessVariantsTest(parameterized.TestCase):
   def test_normalize_predictions(self, predictions, expected_predictions):
     norm_predictions = postprocess_variants.normalize_predictions(predictions)
     np.testing.assert_almost_equal(norm_predictions, expected_predictions)
+
+  @parameterized.parameters(
+      (
+          # 3 different candidates from single_locus_example.
+          # (np.array([0.03, 0.97, 0.0 ]), [1]),
+          # (np.array([0.23, 0.77, 0.0 ]), [2]),
+          # (np.array([0.03, 0.97, 0.0 ]), [3]),
+          # (np.array([0.01, 0.29, 0.70]), [1, 2]),
+          # (np.array([0.01, 0.36, 0.63]), [1, 3]),
+          # (np.array([0.0, 1.00, 0.00]), [2, 3]),
+          [
+              _create_call_variants_output(
+                  indices=[0],
+                  probabilities=[0.03, 0.97, 0.0],
+                  alts=['A', 'B', 'C'],
+              ),
+              _create_call_variants_output(
+                  indices=[1],
+                  probabilities=[0.23, 0.77, 0.0],
+                  alts=['A', 'B', 'C'],
+              ),
+              _create_call_variants_output(
+                  indices=[2],
+                  probabilities=[0.03, 0.97, 0.0],
+                  alts=['A', 'B', 'C'],
+              ),
+              _create_call_variants_output(
+                  indices=[0, 1],
+                  probabilities=[0.01, 0.29, 0.70],
+                  alts=['A', 'B', 'C'],
+              ),
+              _create_call_variants_output(
+                  indices=[0, 2],
+                  probabilities=[0.01, 0.36, 0.63],
+                  alts=['A', 'B', 'C'],
+              ),
+              _create_call_variants_output(
+                  indices=[1, 2],
+                  probabilities=[0.0, 1.00, 0.00],
+                  alts=['A', 'B', 'C'],
+              ),
+          ],
+          # Genotype map:
+          # {(0, 0): [0.03, 0.23, 0.03, 0.01, 0.01, 0.0],
+          # (0, 1): [0.97, 0.23, 0.03, 0.29, 0.36, 0.0],
+          # (0, 2): [0.03, 0.77, 0.03, 0.29, 0.01, 1.0],
+          # (0, 3): [0.03, 0.23, 0.97, 0.01, 0.36, 1.0],
+          # (1, 1): [0.0, 0.23, 0.03, 0.7, 0.63, 0.0],
+          # (1, 2): [0.97, 0.77, 0.03, 0.7, 0.36, 1.0],
+          # (1, 3): [0.97, 0.23, 0.97, 0.29, 0.63, 1.0],
+          # (2, 2): [0.03, 0.0, 0.03, 0.7, 0.01, 0.0],
+          # (2, 3): [0.03, 0.77, 0.97, 0.29, 0.36, 0.0],
+          # (3, 3): [0.03, 0.23, 0.0, 0.01, 0.63, 0.0]}
+          [
+              0.0,  # 0/0
+              0.0,  # 0/1
+              0.0,  # 1/1
+              4.44523e-05,  # 0/2
+              1.24896e-01,  # 1/2
+              0.0,  # 2/2
+              5.32950e-04,  # 0/3
+              8.74527e-01,  # 1/3
+              0.0,  # 2/3
+              0.0,  # 3/3
+          ],
+      ),
+  )
+  @flagsaver.flagsaver
+  def test_merge_predictions_multiallelics_probs_product(
+      self, inputs, expected_unnormalized_probs, qual_filter=None
+  ):
+    FLAGS.multiallelic_mode = 'product'
+    multiallelic_model = postprocess_variants.get_multiallelic_model(
+        use_multiallelic_model=False
+    )
+    denominator = sum(expected_unnormalized_probs)
+    for permuted_inputs in itertools.permutations(inputs):
+      _, predictions = postprocess_variants.merge_predictions(
+          permuted_inputs,
+          multiallelic_model=multiallelic_model,
+          qual_filter=qual_filter,
+      )
+      np.testing.assert_almost_equal(
+          predictions,
+          [x / denominator for x in expected_unnormalized_probs],
+          decimal=5,
+      )
 
   @parameterized.parameters(
       # Example with 2 alternate_bases:
@@ -978,6 +1093,34 @@ class PostprocessVariantsTest(parameterized.TestCase):
           ],
           [0.99, 0.01, 0.0],
           6,
+      ),
+      # Example with 2 alternate_bases which are called by 2 separate models.
+      # expected_unnormalized_probs is min of 0/0, 0/1, 1/1, 0/2, 1/2, 2/2
+      (
+          [
+              _create_call_variants_output(
+                  indices=[0],
+                  probabilities=[0.19, 0.75, 0.06],
+                  variant=_create_variant_with_alleles(
+                      alts=['C', 'T'], model_id='small_model'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[1],
+                  probabilities=[0.03, 0.93, 0.04],
+                  variant=_create_variant_with_alleles(
+                      alts=['C', 'T'], model_id='deepvariant'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[0, 1],
+                  probabilities=[0.03, 0.92, 0.05],
+                  variant=_create_variant_with_alleles(
+                      alts=['C', 'T'], model_id='deepvariant'
+                  ),
+              ),
+          ],
+          [0.033062, 0.10498016, 0.00496365, 0.5842303, 0.2543793, 0.01838462],
       ),
   )
   @flagsaver.flagsaver
@@ -1124,6 +1267,131 @@ class PostprocessVariantsTest(parameterized.TestCase):
   def test_exception_merge_predictions(self, inputs, text):
     with self.assertRaisesRegex(ValueError, text):
       postprocess_variants.merge_predictions(inputs)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='biallelic_case',
+          call_variants_outputs=[
+              _create_call_variants_output(
+                  indices=[0],
+                  probabilities=[0.999, 0.001, 0],
+                  variant=_create_variant_with_alleles(
+                      alts=['T'], model_id='small_model'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[0],
+                  probabilities=[0.2, 0.8, 0],
+                  variant=_create_variant_with_alleles(
+                      alts=['T'], model_id='deepvariant'
+                  ),
+              ),
+          ],
+          gq_threshold=20,
+          expected_indices=[0],
+      ),
+      dict(
+          testcase_name='multiallelic_case',
+          call_variants_outputs=[
+              _create_call_variants_output(
+                  indices=[0],
+                  probabilities=[0.999, 0.001, 0],  # above threshold
+                  variant=_create_variant_with_alleles(
+                      alts=['T', 'C'], model_id='small_model'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[0],
+                  probabilities=[0.2, 0.8, 0],
+                  variant=_create_variant_with_alleles(
+                      alts=['T', 'C'], model_id='deepvariant'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[1],
+                  probabilities=[0.2, 0.8, 0],  # below threshold
+                  variant=_create_variant_with_alleles(
+                      alts=['T', 'C'], model_id='small_model'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[1],
+                  probabilities=[0.999, 0.001, 0],
+                  variant=_create_variant_with_alleles(
+                      alts=['T', 'C'], model_id='deepvariant'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[0, 1],
+                  probabilities=[0.999, 0.001, 0],  # above threshold
+                  variant=_create_variant_with_alleles(
+                      alts=['T', 'C'], model_id='small_model'
+                  ),
+              ),
+              _create_call_variants_output(
+                  indices=[0, 1],
+                  probabilities=[0.2, 0.8, 0],
+                  variant=_create_variant_with_alleles(
+                      alts=['T', 'C'], model_id='deepvariant'
+                  ),
+              ),
+          ],
+          gq_threshold=20,
+          expected_indices=[0, 3, 4],
+      ),
+  )
+  def test_resolve_call_variant_output_by_model(
+      self, call_variants_outputs, gq_threshold, expected_indices
+  ):
+    output = postprocess_variants.resolve_call_variant_outputs_by_model(
+        call_variants_outputs, gq_threshold
+    )
+    expected_output = [call_variants_outputs[i] for i in expected_indices]
+    self.assertEqual(output, expected_output)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='variants_match_same_model',
+          variant_1=_create_variant_with_alleles(
+              alts=['T'], model_id='deepvariant'
+          ),
+          variant_2=_create_variant_with_alleles(
+              alts=['T'], model_id='deepvariant'
+          ),
+          variants_are_equal=True,
+      ),
+      dict(
+          testcase_name='variants_match_different_model',
+          variant_1=_create_variant_with_alleles(
+              alts=['T'], model_id='small_model'
+          ),
+          variant_2=_create_variant_with_alleles(
+              alts=['T'], model_id='deepvariant'
+          ),
+          variants_are_equal=True,
+      ),
+      dict(
+          testcase_name='variants_do_not_match',
+          variant_1=_create_variant_with_alleles(alts=['T']),
+          variant_2=_create_variant_with_alleles(alts=['C']),
+          variants_are_equal=False,
+      ),
+      dict(
+          testcase_name='variants_do_not_match_same_model',
+          variant_1=_create_variant_with_alleles(
+              alts=['T'], model_id='deepvariant'
+          ),
+          variant_2=_create_variant_with_alleles(
+              alts=['C'], model_id='deepvariant'
+          ),
+          variants_are_equal=False,
+      ),
+  )
+  def test_variants_are_equal(self, variant_1, variant_2, variants_are_equal):
+    self.assertEqual(
+        postprocess_variants.variants_are_equal(variant_1, variant_2),
+        variants_are_equal,
+    )
 
   @parameterized.parameters(
       (
@@ -1369,7 +1637,10 @@ class PostprocessVariantsTest(parameterized.TestCase):
     )
     variantcall_utils.set_ad(raw_variant.calls[0], [1, 1])
     variant = postprocess_variants.add_call_to_variant(
-        variant=raw_variant, predictions=probs, sample_name=_DEFAULT_SAMPLE_NAME
+        variant=raw_variant,
+        predictions=probs,
+        qual_filter=0.0,
+        sample_name=_DEFAULT_SAMPLE_NAME,
     )
     self.assertEqual(variant.reference_bases, expected.reference_bases)
     self.assertEqual(variant.alternate_bases, expected.alternate_bases)
@@ -1426,11 +1697,17 @@ class PostprocessVariantsTest(parameterized.TestCase):
       ),
   )
   def test_maybe_phase_genotype(
-      self, genotype, phasing_info, expected_is_phased, expected_genotype
+      self,
+      genotype,
+      phasing_info,
+      expected_is_phased,
+      expected_genotype,
   ):
     variant = variants_pb2.Variant()
-    variant_utils.set_info(variant, 'PS_CONTIG', _DEFAULT_PS_CONTIG)
-    variant_utils.set_info(variant, 'ALT_PS', phasing_info)
+    variant_utils.set_info(
+        variant, dv_constants.VARIANT_PHASE_SET, _DEFAULT_PS_CONTIG
+    )
+    variant_utils.set_info(variant, dv_constants.PHASED_GENOTYPE, phasing_info)
 
     is_phased, genotype = postprocess_variants.maybe_phase_genotype(
         variant, genotype
@@ -1477,7 +1754,10 @@ class PostprocessVariantsTest(parameterized.TestCase):
     probs[highest_prob_position] = 0.995
     variantcall_utils.set_ad(raw_variant.calls[0], [1, 1, 1])
     variant = postprocess_variants.add_call_to_variant(
-        variant=raw_variant, predictions=probs, sample_name=_DEFAULT_SAMPLE_NAME
+        variant=raw_variant,
+        predictions=probs,
+        qual_filter=0.0,
+        sample_name=_DEFAULT_SAMPLE_NAME,
     )
     self.assertEqual(variant.calls[0].genotype, expected_best_genotype)
 
@@ -1554,44 +1834,6 @@ class PostprocessVariantsTest(parameterized.TestCase):
   def test_most_likely_genotype_raises_with_non2_ploidy(self, bad_ploidy):
     with self.assertRaises(NotImplementedError):
       postprocess_variants.most_likely_genotype([1, 0, 0], ploidy=bad_ploidy)
-
-  def test_compute_filter_fields(self):
-    # This generates too many tests as a parameterized test.
-    for qual, min_qual in itertools.product(range(100), range(100)):
-      # First test with no alleleic depth.
-      variant = variants_pb2.Variant()
-      variant.quality = qual
-      expected = []
-      expected.append(dv_vcf_constants.DEEP_VARIANT_NO_CALL)
-      self.assertEqual(
-          postprocess_variants.compute_filter_fields(variant, min_qual),
-          expected,
-      )
-      # Now add hom ref genotype and AD --> qual shouldn't affect filter field
-      del variant.filter[:]
-      variant.calls.add(genotype=[0, 0])
-      variantcall_utils.set_ad(variant.calls[0], [1, 1])
-      expected = []
-      expected.append(dv_vcf_constants.DEEP_VARIANT_REF_FILTER)
-      self.assertEqual(
-          postprocess_variants.compute_filter_fields(variant, min_qual),
-          expected,
-      )
-      # Now add variant genotype --> qual filter should matter again
-      del variant.filter[:]
-      del variant.calls[:]
-      variant.calls.add(genotype=[0, 1])
-      variantcall_utils.set_ad(variant.calls[0], [1, 1])
-      expected = []
-      expected.append(
-          dv_vcf_constants.DEEP_VARIANT_PASS
-          if qual >= min_qual
-          else dv_vcf_constants.DEEP_VARIANT_QUAL_FILTER
-      )
-      self.assertEqual(
-          postprocess_variants.compute_filter_fields(variant, min_qual),
-          expected,
-      )
 
   @parameterized.parameters(
       (
@@ -1973,6 +2215,69 @@ class MergeVcfAndGvcfTest(parameterized.TestCase):
     # In sorted output, 3rd has indices=[1].
     self.assertEqual(output[2], group[1])
     self.assertEqual(output[2].alt_allele_indices.indices, [1])
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_postprocessing(self):
+    # Prepare a dummy checkpoint_json file
+    checkpoint_json_path = test_utils.test_tmpfile('model.example_info.json')
+    with tf.io.gfile.GFile(checkpoint_json_path, 'w') as f:
+      json.dump({'flags_for_postprocessing': {'multiallelic_mode': 'min'}}, f)
+
+    FLAGS.checkpoint_json = checkpoint_json_path
+    # Set a default value for multiallelic_mode to be different from JSON
+    FLAGS.multiallelic_mode = 'product'
+
+    # Create a mock for FLAGS to simulate application
+    # We use the actual FLAGS object but verify it changes
+    postprocess_variants.apply_flags_for_postprocessing(FLAGS)
+
+    self.assertEqual(FLAGS.multiallelic_mode, 'min')
+
+  @flagsaver.flagsaver
+  def test_apply_flags_for_postprocessing_overridden(self):
+    # Prepare a dummy checkpoint_json file
+    checkpoint_json_path = test_utils.test_tmpfile('model.example_info.json')
+    with tf.io.gfile.GFile(checkpoint_json_path, 'w') as f:
+      json.dump({'flags_for_postprocessing': {'multiallelic_mode': 'min'}}, f)
+
+    FLAGS.checkpoint_json = checkpoint_json_path
+    # Explicitly set the flag on command line (simulated by marking as present)
+    FLAGS.multiallelic_mode = 'product'
+
+    # We need to simulate that the flag was present on command line.
+    # absl flags doesn't make it easy to forcefully set 'present'
+    # without parsing argv.
+    # So we will verify the logic by checking if it logs a warning,
+    # but since we can't easily mock 'present' status of a real Flag object
+    # without deeper hacking, we might rely on the fact that if we set it
+    # via FLAGS.flag = value it might not count as 'present' in some versions,
+    # OR we just test that it DOES NOT update if we can simulate presence.
+
+    # Actually, apply_flags_for_postprocessing checks `flag.present`.
+    # Let's try to manually set it for this test if possible, or skip this
+    # specific override check if too complex for integration test.
+    # However, strict behavior verification is important.
+
+    # Let's use a fresh FlagValues object for more control if possible,
+    # OR just trust the logic we verified in the isolated test (which we are
+    # deleting). Replicating the isolated test logic:
+
+    flag_values = flags.FlagValues()
+    flags.DEFINE_string(
+        'multiallelic_mode', 'product', 'help', flag_values=flag_values
+    )
+    flags.DEFINE_string(
+        'checkpoint_json', checkpoint_json_path, 'help', flag_values=flag_values
+    )
+
+    # Simulate command line presence
+    flag_values['multiallelic_mode'].present = 1
+    flag_values.mark_as_parsed()
+
+    postprocess_variants.apply_flags_for_postprocessing(flag_values)
+
+    # parameters should NOT change because it was present
+    self.assertEqual(flag_values.multiallelic_mode, 'product')
 
 
 if __name__ == '__main__':

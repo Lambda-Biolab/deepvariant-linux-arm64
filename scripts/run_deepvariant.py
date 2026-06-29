@@ -34,11 +34,11 @@ If you want to access more flags that are available in `make_examples`,
 using the binaries in the Docker image.
 
 For more details, see:
-https://github.com/google/deepvariant/blob/r1.9/docs/deepvariant-quick-start.md
+https://github.com/google/deepvariant/blob/r1.10/docs/deepvariant-quick-start.md
 """
 
-import dataclasses
 import enum
+import json
 import os
 import re
 import subprocess
@@ -61,6 +61,7 @@ class ModelType(enum.Enum):
   ONT_R104 = 'ONT_R104'
   HYBRID_PACBIO_ILLUMINA = 'HYBRID_PACBIO_ILLUMINA'
   MASSEQ = 'MASSEQ'
+  RNASEQ = 'RNASEQ'
 
 
 # Required flags.
@@ -172,13 +173,22 @@ _VERSION = flags.DEFINE_boolean(
     allow_hide_cpp=True,
 )
 
-# Optional flags for call_variants.
+# Optional flags for call_variants and make_examples.
 _CUSTOMIZED_MODEL = flags.DEFINE_string(
     'customized_model',
     None,
     (
         'Optional. A path to a model checkpoint to load for the `call_variants`'
         ' step. If not set, the default for each --model_type will be used'
+    ),
+)
+_CUSTOMIZED_MODEL_JSON = flags.DEFINE_string(
+    'customized_model_json',
+    None,
+    (
+        'Optional. File path to a model.example_info.json to pair with'
+        ' --customized_model. If not set, we will use the'
+        ' model.example_info.json found in the model directory.'
     ),
 )
 _DISABLE_SMALL_MODEL = flags.DEFINE_boolean(
@@ -195,7 +205,6 @@ _CUSTOMIZED_SMALL_MODEL = flags.DEFINE_string(
         'the `make_examples` step.'
     ),
 )
-# Optional flags for make_examples.
 _NUM_SHARDS = flags.DEFINE_integer(
     'num_shards', 1, 'Optional. Number of shards for make_examples step.'
 )
@@ -270,6 +279,13 @@ _POSTPROCESS_VARIANTS_EXTRA_ARGS = flags.DEFINE_string(
         ' boolean, it has to be flag_name=true or flag_name=false.'
     ),
 )
+_PHASE_VCF = flags.DEFINE_boolean(
+    'phase_vcf',
+    None,
+    'Optional. If true, emit phasing information in the VCF output. Available'
+    ' for long-read models (PacBio, ONT) only. Default is True for PacBio and'
+    ' ONT models and False for others.',
+)
 
 # Optional flags for postprocess_variants.
 _OUTPUT_GVCF = flags.DEFINE_string(
@@ -293,6 +309,16 @@ _REPORT_TITLE = flags.DEFINE_string(
         'If not provided, the title will be the sample name.'
     ),
 )
+_EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES = flags.DEFINE_list(
+    'emit_vcf_by_small_model_gq_values',
+    None,
+    '[Experimental] When set as a list of integers, DeepVariant classifies all'
+    ' candidates using both small and CNN models. It then generates separate'
+    ' VCF files for each specified GQ (Genotype Quality) threshold by'
+    ' initiating multiple post-processing jobs. This experimental feature aims'
+    ' to analyze the combined accuracy of the two models across different GQ'
+    ' thresholds for all samples.',
+)
 
 MODEL_TYPE_MAP = {
     ModelType.WGS: '/opt/models/wgs',
@@ -301,41 +327,12 @@ MODEL_TYPE_MAP = {
     ModelType.ONT_R104: '/opt/models/ont_r104',
     ModelType.HYBRID_PACBIO_ILLUMINA: '/opt/models/hybrid_pacbio_illumina',
     ModelType.MASSEQ: '/opt/models/masseq',
-}
-
-
-@dataclasses.dataclass
-class SmallModelConfig:
-  small_model_checkpoint: str
-  snp_gq_threshold: int
-  indel_gq_threshold: int
-  vaf_context_window: int
-
-
-SMALL_MODEL_CONFIG_BY_MODEL_TYPE = {
-    ModelType.WGS: SmallModelConfig(
-        small_model_checkpoint='/opt/smallmodels/wgs',
-        snp_gq_threshold=20,
-        indel_gq_threshold=28,
-        vaf_context_window=51,
-    ),
-    ModelType.PACBIO: SmallModelConfig(
-        small_model_checkpoint='/opt/smallmodels/pacbio',
-        snp_gq_threshold=15,
-        indel_gq_threshold=16,
-        vaf_context_window=51,
-    ),
-    ModelType.ONT_R104: SmallModelConfig(
-        small_model_checkpoint='/opt/smallmodels/ont_r104',
-        snp_gq_threshold=9,
-        indel_gq_threshold=17,
-        vaf_context_window=51,
-    ),
+    ModelType.RNASEQ: '/opt/models/rnaseq',
 }
 
 # Current release version of DeepVariant.
 # Should be the same in dv_vcf_constants.py.
-DEEP_VARIANT_VERSION = '1.9.0'
+DEEP_VARIANT_VERSION = '1.10.0'
 
 
 def _is_quoted(value):
@@ -411,36 +408,45 @@ def _update_kwargs_with_warning(kwargs, extra_args):
   return kwargs
 
 
-def _use_small_model() -> bool:
+def _use_small_model(model_ckpt_json: Optional[str] = None) -> bool:
   """Determines if the small model is enabled based on flags and model type."""
   if _DISABLE_SMALL_MODEL.value:
     return False
   if _CUSTOMIZED_SMALL_MODEL.value:
     return True
-  return ModelType(_MODEL_TYPE.value) in SMALL_MODEL_CONFIG_BY_MODEL_TYPE
+  if model_ckpt_json and tf.io.gfile.exists(model_ckpt_json):
+    with tf.io.gfile.GFile(model_ckpt_json) as f:
+      info = json.load(f)
+      if info.get('flags_for_calling', {}).get('trained_small_model_path'):
+        return True
+  return False
 
 
 def _set_small_model_config(
     special_args: dict[str, Any],
-    model_type: ModelType,
     customized_small_model: str | None,
+    model_ckpt_json: str | None,
 ) -> None:
   """Sets small model config parameters."""
-  if not _use_small_model():
+  if not _use_small_model(model_ckpt_json):
+    special_args['call_small_model_examples'] = False
     return
   special_args['call_small_model_examples'] = True
-  special_args['track_ref_reads'] = True
-  config = SMALL_MODEL_CONFIG_BY_MODEL_TYPE.get(model_type)
   if customized_small_model:
     special_args['trained_small_model_path'] = customized_small_model
-  elif config:
-    special_args['trained_small_model_path'] = config.small_model_checkpoint
-  if config:
-    special_args['small_model_snp_gq_threshold'] = config.snp_gq_threshold
-    special_args['small_model_indel_gq_threshold'] = config.indel_gq_threshold
-    special_args['small_model_vaf_context_window_size'] = (
-        config.vaf_context_window
-    )
+  if _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+    special_args['small_model_emit_all_candidates'] = True
+
+
+def _rename_vcf_file_by_gq(
+    vcf_file: str,
+    gq_threshold: str | int,
+) -> str:
+  """Renames a VCF file by adding a suffix with the GQ threshold."""
+  if vcf_file.endswith('.vcf.gz'):
+    return vcf_file.replace('.vcf.gz', f'_gq_{gq_threshold}.vcf.gz')
+  else:
+    return f'{vcf_file}_gq_{gq_threshold}.vcf.gz'
 
 
 def make_examples_command(
@@ -448,8 +454,10 @@ def make_examples_command(
     reads,
     examples,
     model_ckpt,
+    model_ckpt_json,
     extra_args,
     runtime_by_region_path=None,
+    output_local_read_phasing=None,
     **kwargs,
 ):
   """Returns a make_examples (command, logfile) for subprocess.
@@ -459,8 +467,10 @@ def make_examples_command(
     reads: Input BAM file.
     examples: Output tfrecord file containing tensorflow.Example files.
     model_ckpt: Path to the TensorFlow model checkpoint.
+    model_ckpt_json: Path to the model.example_info.json file, or None.
     extra_args: Comma-separated list of flag_name=flag_value.
     runtime_by_region_path: Output path for runtime by region metrics.
+    output_local_read_phasing: Output path for local read phasing TSV files.
     **kwargs: Additional arguments to pass in for make_examples.
 
   Returns:
@@ -477,60 +487,29 @@ def make_examples_command(
   command.extend(['--reads', '"{}"'.format(reads)])
   command.extend(['--examples', '"{}"'.format(examples)])
   command.extend(['--checkpoint', '"{}"'.format(model_ckpt)])
+  if model_ckpt_json:
+    command.extend(['--checkpoint_json', '"{}"'.format(model_ckpt_json)])
 
   if runtime_by_region_path is not None:
     command.extend(
         ['--runtime_by_region', '"{}"'.format(runtime_by_region_path)]
     )
+  if output_local_read_phasing is not None:
+    command.extend([
+        '--output_local_read_phasing',
+        '"{}"'.format(output_local_read_phasing),
+    ])
+    command.extend(['--output_phase_info'])
 
   special_args = {}
-  model_type = ModelType(_MODEL_TYPE.value)
-  if model_type == ModelType.PACBIO:
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['max_reads_per_partition'] = 600
-    special_args['min_mapping_quality'] = 1
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 147
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_min_fraction_indels'] = 0.12
-    special_args['trim_reads_for_pileup'] = True
-  elif model_type == ModelType.ONT_R104:
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['max_reads_per_partition'] = 600
-    special_args['min_mapping_quality'] = 5
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 99
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_min_fraction_snps'] = 0.08
-    special_args['vsc_min_fraction_indels'] = 0.12
-    special_args['trim_reads_for_pileup'] = True
-  elif model_type == ModelType.HYBRID_PACBIO_ILLUMINA:
-    special_args['trim_reads_for_pileup'] = True
-  elif model_type == ModelType.MASSEQ:
-    special_args['alt_aligned_pileup'] = 'diff_channels'
-    special_args['max_reads_per_partition'] = 0
-    special_args['min_mapping_quality'] = 1
-    special_args['parse_sam_aux_fields'] = True
-    special_args['partition_size'] = 25000
-    special_args['phase_reads'] = True
-    special_args['pileup_image_width'] = 199
-    special_args['realign_reads'] = False
-    special_args['sort_by_haplotypes'] = True
-    special_args['track_ref_reads'] = True
-    special_args['vsc_min_fraction_indels'] = 0.12
-    special_args['trim_reads_for_pileup'] = True
-    special_args['max_reads_for_dynamic_bases_per_region'] = 1500
-
+  # Starting from v1.10.0, the args for make_examples in calling mode are
+  # defined in the model.example_info.json file corresponding to each model
+  # type.
+  # Small model args should be in the model.example_info.json file
+  # as well. However, if the user specifies customized small model, we will
+  # override the default small model args here.
   _set_small_model_config(
-      special_args, model_type, _CUSTOMIZED_SMALL_MODEL.value
+      special_args, _CUSTOMIZED_SMALL_MODEL.value, model_ckpt_json
   )
   kwargs = _update_kwargs_with_warning(kwargs, special_args)
   # Extend the command with all items in kwargs and extra_args.
@@ -584,6 +563,7 @@ def postprocess_variants_command(
     outfile: str,
     small_model_cvo_records: str,
     extra_args: str,
+    model_ckpt_json: Optional[str] = None,
     **kwargs,
 ) -> tuple[str, Optional[str]]:
   """Returns a postprocess_variants (command, logfile) for subprocess."""
@@ -598,7 +578,9 @@ def postprocess_variants_command(
   command.extend(['--infile', '"{}"'.format(infile)])
   command.extend(['--outfile', '"{}"'.format(outfile)])
   command.extend(['--cpus', '"{}"'.format(cpus)])
-  if _use_small_model():
+  if model_ckpt_json and tf.io.gfile.exists(model_ckpt_json):
+    command.extend(['--checkpoint_json', '"{}"'.format(model_ckpt_json)])
+  if _use_small_model(model_ckpt_json):
     command.extend(
         ['--small_model_cvo_records', '"{}"'.format(small_model_cvo_records)]
     )
@@ -654,6 +636,12 @@ def runtime_by_region_vis_command(
   return (' '.join(command), None)
 
 
+def _should_phase_vcf() -> bool:
+  if _PHASE_VCF.value is not None:
+    return _PHASE_VCF.value
+  return _MODEL_TYPE.value in [ModelType.PACBIO.value, ModelType.ONT_R104.value]
+
+
 def check_or_create_intermediate_results_dir(
     intermediate_results_dir: Optional[str],
 ) -> str:
@@ -684,14 +672,13 @@ def check_flags():
 
     if use_saved_model:
       logging.info('Using saved model: %s', str(use_saved_model))
-    elif (
-        not tf.io.gfile.exists(_CUSTOMIZED_MODEL.value + '.data-00000-of-00001')
-        or not tf.io.gfile.exists(_CUSTOMIZED_MODEL.value + '.index')
-    ):
+    elif not tf.io.gfile.exists(
+        _CUSTOMIZED_MODEL.value + '.data-00000-of-00001'
+    ) or not tf.io.gfile.exists(_CUSTOMIZED_MODEL.value + '.index'):
       raise RuntimeError(
           'The model files {}* do not exist. Potentially '
           'relevant issue: '
-          'https://github.com/google/deepvariant/blob/r1.9/docs/'
+          'https://github.com/google/deepvariant/blob/r1.10/docs/'
           'FAQ.md#why-cant-it-find-one-of-the-input-files-eg-'
           'could-not-open'.format(_CUSTOMIZED_MODEL.value)
       )
@@ -704,6 +691,27 @@ def check_flags():
         _MODEL_TYPE.value,
         _CUSTOMIZED_MODEL.value,
     )
+    if tf.io.gfile.isdir(_CUSTOMIZED_MODEL.value):
+      model_dir = _CUSTOMIZED_MODEL.value
+    else:
+      model_dir = os.path.dirname(_CUSTOMIZED_MODEL.value)
+    # Check if model.example_info.json exists in the model directory
+    # or if the user provided a customized json file.
+    json_in_model_dir = tf.io.gfile.exists(
+        f'{model_dir}/model.example_info.json'
+    )
+    custom_json_exists = _CUSTOMIZED_MODEL_JSON.value and tf.io.gfile.exists(
+        _CUSTOMIZED_MODEL_JSON.value
+    )
+
+    if not json_in_model_dir and not custom_json_exists:
+      raise RuntimeError(
+          'Starting from v1.10.0, the model file needs to have a corresponding'
+          ' model.example_info.json file. You can see'
+          f' gs://deepvariant/models/DeepVariant/{DEEP_VARIANT_VERSION}/savedmodels/deepvariant.*.savedmodel/model.example_info.json'
+          ' as examples. The best way is to consult the people who trained the'
+          ' model to understand what flags should be used for make_examples.'
+      )
   if _CUSTOMIZED_SMALL_MODEL.value is not None:
     logging.info(
         (
@@ -715,6 +723,15 @@ def check_flags():
         _MODEL_TYPE.value,
         _CUSTOMIZED_SMALL_MODEL.value,
     )
+  if _should_phase_vcf():
+    if ModelType(_MODEL_TYPE.value) not in [
+        ModelType.PACBIO,
+        ModelType.ONT_R104,
+    ]:
+      raise RuntimeError(
+          'Emiting phasing information is only supported for PacBio and ONT'
+          ' models.'
+      )
 
 
 def get_model_ckpt(model_type: str, customized_model: str) -> str:
@@ -748,6 +765,11 @@ def create_all_commands_and_logfiles(intermediate_results_dir):
           _NUM_SHARDS.value, gz_ext
       ),
   )
+  local_read_phasing_tsv_files = None
+  if _should_phase_vcf():
+    local_read_phasing_tsv_files = os.path.join(
+        intermediate_results_dir, f'read-phasing_debug@{_NUM_SHARDS.value}.tsv'
+    )
 
   if _LOGGING_DIR.value and _RUNTIME_REPORT.value:
     runtime_directory = os.path.join(
@@ -768,12 +790,24 @@ def create_all_commands_and_logfiles(intermediate_results_dir):
     runtime_by_region_path = None
 
   model_ckpt = get_model_ckpt(_MODEL_TYPE.value, _CUSTOMIZED_MODEL.value)
+
+  model_ckpt_json = _CUSTOMIZED_MODEL_JSON.value
+  if not model_ckpt_json:
+    if tf.io.gfile.isdir(model_ckpt):
+      model_dir = model_ckpt
+    else:
+      model_dir = os.path.dirname(model_ckpt)
+    potential_json = f'{model_dir}/model.example_info.json'
+    if tf.io.gfile.exists(potential_json):
+      model_ckpt_json = potential_json
+
   commands.append(
       make_examples_command(
           ref=_REF.value,
           reads=_READS.value,
           examples=examples,
           model_ckpt=model_ckpt,
+          model_ckpt_json=model_ckpt_json,
           runtime_by_region_path=runtime_by_region_path,
           extra_args=_MAKE_EXAMPLES_EXTRA_ARGS.value,
           # kwargs:
@@ -782,6 +816,7 @@ def create_all_commands_and_logfiles(intermediate_results_dir):
           sample_name=_SAMPLE_NAME.value,
           haploid_contigs=_HAPLOID_CONTIGS.value,
           par_regions_bed=_PAR_REGIONS.value,
+          output_local_read_phasing=local_read_phasing_tsv_files,
       )
   )
 
@@ -800,29 +835,50 @@ def create_all_commands_and_logfiles(intermediate_results_dir):
   )
 
   # postprocess_variants
-  commands.append(
-      postprocess_variants_command(
-          ref=_REF.value,
-          infile=call_variants_output,
-          outfile=_OUTPUT_VCF.value,
-          small_model_cvo_records=small_model_cvo_records,
-          extra_args=_POSTPROCESS_VARIANTS_EXTRA_ARGS.value,
-          nonvariant_site_tfrecord_path=nonvariant_site_tfrecord_path,
-          gvcf_outfile=_OUTPUT_GVCF.value,
-          sample_name=_SAMPLE_NAME.value,
-          haploid_contigs=_HAPLOID_CONTIGS.value,
-          par_regions_bed=_PAR_REGIONS.value,
-          regions=_REGIONS.value,
+  if _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+    for gq in _EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES.value:
+      commands.append(
+          postprocess_variants_command(
+              ref=_REF.value,
+              infile=call_variants_output,
+              outfile=_rename_vcf_file_by_gq(_OUTPUT_VCF.value, gq),
+              small_model_cvo_records=small_model_cvo_records,
+              extra_args=_POSTPROCESS_VARIANTS_EXTRA_ARGS.value,
+              sample_name=_SAMPLE_NAME.value,
+              haploid_contigs=_HAPLOID_CONTIGS.value,
+              par_regions_bed=_PAR_REGIONS.value,
+              regions=_REGIONS.value,
+              resolve_call_variants_outputs_by_model=True,
+              small_model_gq_threshold=gq,
+              phased_reads_input_path=local_read_phasing_tsv_files,
+              model_ckpt_json=model_ckpt_json,
+          )
       )
-  )
-
-  # vcf_stats_report
-  if _VCF_STATS_REPORT.value:
+  else:
     commands.append(
-        vcf_stats_report_command(
-            vcf_path=_OUTPUT_VCF.value, title=_REPORT_TITLE.value
+        postprocess_variants_command(
+            ref=_REF.value,
+            infile=call_variants_output,
+            outfile=_OUTPUT_VCF.value,
+            small_model_cvo_records=small_model_cvo_records,
+            extra_args=_POSTPROCESS_VARIANTS_EXTRA_ARGS.value,
+            nonvariant_site_tfrecord_path=nonvariant_site_tfrecord_path,
+            gvcf_outfile=_OUTPUT_GVCF.value,
+            sample_name=_SAMPLE_NAME.value,
+            haploid_contigs=_HAPLOID_CONTIGS.value,
+            par_regions_bed=_PAR_REGIONS.value,
+            regions=_REGIONS.value,
+            phased_reads_input_path=local_read_phasing_tsv_files,
+            model_ckpt_json=model_ckpt_json,
         )
     )
+    # vcf_stats_report
+    if _VCF_STATS_REPORT.value:
+      commands.append(
+          vcf_stats_report_command(
+              vcf_path=_OUTPUT_VCF.value, title=_REPORT_TITLE.value
+          )
+      )
 
   # runtime-by-region
   if _LOGGING_DIR.value and _RUNTIME_REPORT.value:

@@ -30,6 +30,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(dirname "$0")"
+source "$SCRIPT_DIR/inference_utils.sh"
+source "$SCRIPT_DIR/docker_utils.sh"
 
 USAGE=$'
 Example usage:
@@ -81,7 +84,7 @@ SKIP_SOMPY=false
 # Strings; sorted alphabetically.
 unset BAM_NORMAL
 BAM_TUMOR=""
-BIN_VERSION="1.9.0"
+BIN_VERSION="1.10.0"
 CALL_VARIANTS_ARGS=""
 CAPTURE_BED=""
 CUSTOMIZED_MODEL=""
@@ -539,54 +542,85 @@ echo "TRUTH_BED: ${TRUTH_BED}"
 echo "TRUTH_VCF: ${TRUTH_VCF}"
 echo "========================="
 
-function run() {
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    # Prints out command to stdout and a [DRY RUN] tag to stderr.
-    # This allows the users to use the dry_run mode to get a list of
-    # executable commands by redirecting stdout to a file.
-    1>&2 printf "[DRY RUN] " && echo "$*"
-  else
-    echo "$*"
-    eval "$@"
-  fi
-}
-
 function copy_gs_or_http_file() {
-  if [[ "$1" == http* ]]; then
-    if curl --output /dev/null --silent --head --fail "$1"; then
-      run echo "Copying from \"$1\" to \"$2\""
-      run aria2c -c -x10 -s10 "$1" -d "$2"
-    else
-      run echo "File $1 does not exist. Skip copying."
-    fi
-  elif [[ "$1" == gs://* ]]; then
-    status=0
-    gsutil -q stat "$1" || status=1
-    if [[ $status == 0 ]]; then
-      run echo "Copying from \"$1\" to \"$2\""
-      # Skip the file if it exists.
-      run gcloud storage cp -n "$1" "$2"
-    else
-      run echo "File $1 does not exist. Skip copying."
-    fi
-  else
-    echo "Unrecognized file format: $1" >&2
-    exit 1
+  local file_item
+  # Set Internal Field Separator (IFS) to comma to split the string
+  # -r: do not allow backslashes to escape any characters
+  # -a files_to_copy: read into an array named 'files_to_copy'
+  IFS=',' read -r -a files_to_copy <<< "$1"
+
+  # Check if any files were actually parsed
+  if [[ ${#files_to_copy[@]} -eq 0 ]] && [[ -n "$1" ]]; then
+      echo "Warning: No valid file names parsed from the input string '$1'."
+      echo "         This might happen if the string only contains commas or is malformed."
+      exit 1
+  elif [[ ${#files_to_copy[@]} -eq 0 ]]; then
+      echo "No files specified in the input string."
+      exit 1
   fi
+
+  for file_item in "${files_to_copy[@]}"; do
+    local trimmed_file
+    trimmed_file=$(echo "$file_item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    if [[ "$trimmed_file" == http* ]]; then
+      if curl --output /dev/null --silent --head --fail "$trimmed_file"; then
+        run echo "Copying from \"$trimmed_file\" to \"$2\""
+        run aria2c -c -x10 -s10 "$trimmed_file" -d "$2"
+      else
+        run echo "File $trimmed_file does not exist. Skip copying."
+      fi
+    elif [[ "$trimmed_file" == gs://* ]]; then
+      status=0
+      run --skip-dry-run-print gsutil -q stat "$trimmed_file" || status=1
+      if [[ $status == 0 ]]; then
+        run echo "Copying from \"$trimmed_file\" to \"$2\""
+        # Skip the file if it exists.
+        run gcloud storage cp -n "$trimmed_file" "$2"
+      else
+        run echo "File $trimmed_file does not exist. Skip copying."
+      fi
+    else
+      echo "Unrecognized file format: $trimmed_file" >&2
+      exit 1
+    fi
+  done
 }
 
 function copy_correct_index_file() {
-  BAM="$1"
-  INPUT_DIR="$2"
+  # We need to parse the BAM file name to get the correct index file name. And
+  # copy the index file one by one to the input directory using
+  # copy_gs_or_http_file. copy_gs_or_http_file supports copying a list of files
+  # or a single file.
+  local BAM="$1"
+  local INPUT_DIR="$2"
+  local bam_file_item
+
+  # Set Internal Field Separator (IFS) to comma to split the string
+  # -r: do not allow backslashes to escape any characters
+  # -a files_to_copy: read into an array named 'files_to_copy'
+  IFS=',' read -r -a files_to_copy <<< "$BAM"
+
+  # Check if any files were actually parsed
+  if [[ ${#files_to_copy[@]} -eq 0 ]] && [[ -n "$1" ]]; then
+      echo "Warning: No valid file names parsed from the input string '$1'."
+      echo "         This might happen if the string only contains commas or is malformed."
+      exit 1
+  elif [[ ${#files_to_copy[@]} -eq 0 ]]; then
+      echo "No files specified in the input string."
+      exit 1
+  fi
+
   # Index files have two acceptable naming patterns. We explicitly check for
   # both since we cannot use wildcard paths with http files.
-  if [[ "${BAM}" == *".cram" ]]; then
-    copy_gs_or_http_file "${BAM%.cram}.crai" "${INPUT_DIR}"
-    copy_gs_or_http_file "${BAM}.crai" "${INPUT_DIR}"
-  else
-    copy_gs_or_http_file "${BAM%.bam}.bai" "${INPUT_DIR}"
-    copy_gs_or_http_file "${BAM}.bai" "${INPUT_DIR}"
-  fi
+  for bam_file_item in "${files_to_copy[@]}"; do
+    if [[ "${bam_file_item}" == *".cram" ]]; then
+      copy_gs_or_http_file "${bam_file_item%.cram}.crai" "${INPUT_DIR}"
+      copy_gs_or_http_file "${bam_file_item}.crai" "${INPUT_DIR}"
+    else
+      copy_gs_or_http_file "${bam_file_item%.bam}.bai" "${INPUT_DIR}"
+      copy_gs_or_http_file "${bam_file_item}.bai" "${INPUT_DIR}"
+    fi
+  done
 }
 
 function copy_data() {
@@ -659,7 +693,6 @@ function get_docker_image() {
         --build-arg=FROM_IMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 \
         --build-arg=DV_GPU_BUILD=1 -t deepsomatic_gpu ."
       run echo "Done building GPU Docker image ${IMAGE}."
-      docker_args+=( --gpus 1 )
     else
       IMAGE="deepsomatic:latest"
       # Building twice in case the first one times out.
@@ -669,30 +702,14 @@ function get_docker_image() {
     fi
 
   else
-    if [[ "${USE_GPU}" = true ]]; then
-      if [[ "${DOCKER_SOURCE}" = "gcr.io/google.com/brain-genomics/deepvariant" ]]; then
-        IMAGE="${DOCKER_SOURCE}:deepsomatic-${BIN_VERSION}-gpu"
-      else
-        IMAGE="${DOCKER_SOURCE}:${BIN_VERSION}-gpu"
-      fi
-      # shellcheck disable=SC2027
-      # shellcheck disable=SC2086
-      run "sudo docker pull "${IMAGE}" || \
+    IMAGE=$(get_deepsomatic_docker_image_name "${DOCKER_SOURCE}" "${BIN_VERSION}" "${USE_GPU}")
+    # shellcheck disable=SC2027
+    # shellcheck disable=SC2086
+    run "sudo docker pull "${IMAGE}" || \
         (sleep 5 ; sudo docker pull "${IMAGE}")"
-      docker_args+=( --gpus 1 )
-    else
-      if [[ "${DOCKER_SOURCE}" = "gcr.io/google.com/brain-genomics/deepvariant" ]]; then
-        IMAGE="${DOCKER_SOURCE}:deepsomatic-${BIN_VERSION}"
-      else
-        IMAGE="${DOCKER_SOURCE}:${BIN_VERSION}"
-      fi
-      # shellcheck disable=SC2027
-      # shellcheck disable=SC2086
-      run "sudo docker pull "${IMAGE}" || \
-        (sleep 5 ; sudo docker pull "${IMAGE}")"
-    fi
   fi
   if [[ "${USE_GPU}" = true ]]; then
+    docker_args+=( --gpus all )
     # shellcheck disable=SC2027
     # shellcheck disable=SC2086
     run "sudo docker run --gpus 1 "${IMAGE}" \
@@ -772,11 +789,34 @@ function setup_args() {
   extra_args+=( --runtime_report )
 }
 
+# Process input as a comma-separated list of files.
+# First extract base names from the list. Then add them to the coma-separated
+# line containing basenames prepended with "/input/".
+function process_file_list() {
+  FILE_LIST="$1"
+  processed_reads_list=()
+  if [[ -n "$1" ]]; then
+      _OLD_IFS="$IFS"; IFS=','; read -r -a bam_array <<< "$FILE_LIST"; IFS="$_OLD_IFS"
+      for item in "${bam_array[@]}"; do
+          trimmed_item=$(echo "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [[ -z "$trimmed_item" ]]; then continue; fi
+          base_name=$(basename -- "$trimmed_item")
+          processed_reads_list+=( "/input/$base_name" )
+      done
+  fi
+
+  basename_list=""
+  if [[ ${#processed_reads_list[@]} -gt 0 ]]; then
+      _OLD_IFS="$IFS"; IFS=','; basename_list="${processed_reads_list[*]}"; IFS="$_OLD_IFS"
+  fi
+  echo "$basename_list"
+}
+
 function run_deepsomatic_with_docker() {
   run echo "Run DeepSomatic..."
   run echo "using IMAGE=${IMAGE}"
   if [[ ! -z "${BAM_NORMAL}" ]]; then
-    extra_args+=( --reads_normal "/input/$(basename "$BAM_NORMAL")" )
+    extra_args+=( --reads_normal "$(process_file_list "$BAM_NORMAL")")
   fi
   if [[ ! -z "${PON_FILTERING}" ]]; then
     extra_args+=( --pon_filtering "/input/$(basename "$PON_FILTERING")" )
@@ -793,14 +833,14 @@ function run_deepsomatic_with_docker() {
   # shellcheck disable=SC2086
   # shellcheck disable=SC2145
   run "(time (sudo docker run \
+    ${docker_args[@]-} \
     -v "${INPUT_DIR}":"/input" \
     -v "${OUTPUT_DIR}:/output" \
-    ${docker_args[@]-} \
     "${IMAGE}" \
     run_deepsomatic \
     --model_type="${MODEL_TYPE}" \
     --ref="/input/$(basename $REF).gz" \
-    --reads_tumor="/input/$(basename $BAM_TUMOR)" \
+    --reads_tumor="$(process_file_list $BAM_TUMOR)" \
     --output_vcf="/output/${OUTPUT_VCF}" \
     --num_shards "${NUM_SHARDS}" \
     --logging_dir="/output/logs" \

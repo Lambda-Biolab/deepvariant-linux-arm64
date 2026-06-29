@@ -28,7 +28,6 @@
 # POSSIBILITY OF SUCH DAMAGE.
 """Shared flags and option handling for DeepVariant and DeepTrio."""
 
-import os.path
 import re
 import textwrap
 from typing import List
@@ -97,6 +96,15 @@ _CHECKPOINT = flags.DEFINE_string(
     'checkpoint',
     None,
     'Path to the TensorFlow model checkpoint.',
+)
+_CHECKPOINT_JSON = flags.DEFINE_string(
+    'checkpoint_json',
+    None,
+    (
+        'Optional. File path to a model.example_info.json to pair with'
+        ' --checkpoint. If not set, we will use the'
+        ' model.example_info.json found in the checkpoint directory.'
+    ),
 )
 _CANDIDATES = flags.DEFINE_string(
     'candidates',
@@ -193,7 +201,7 @@ _PARTITION_SIZE = flags.DEFINE_integer(
     1000,
     (
         'The maximum number of basepairs we will allow in a region before'
-        ' splittingit into multiple smaller subregions.'
+        ' splitting it into multiple smaller subregions.'
     ),
 )
 _MAX_READS_PER_PARTITION = flags.DEFINE_integer(
@@ -234,7 +242,7 @@ _MAX_READ_LENGTH_TO_REALIGN = flags.DEFINE_integer(
         ' are never realigned.'
     ),
 )
-_TRIM_READS_FOR_PILUP = flags.DEFINE_bool(
+_TRIM_READS_FOR_PILEUP = flags.DEFINE_bool(
     'trim_reads_for_pileup',
     False,
     (
@@ -340,7 +348,7 @@ _VSC_MIN_FRACTION_MULTIPLIER = flags.DEFINE_float(
         ' allele fraction thresholds (vsc_min_fraction_snps and'
         ' vsc_min_fraction_indels) to adapt thresholds for multi-sample'
         ' calling. This has to in the (0, 1] interval. It can also be set to'
-        ' float("inf") programmaticaly to only use candidates from the target'
+        ' float("inf") programmatically to only use candidates from the target'
         ' sample in multi-sample calling.'
     ),
 )
@@ -501,6 +509,14 @@ _HP_TAG_FOR_ASSEMBLY_POLISHING = flags.DEFINE_integer(
         'sort_by_haplotypes has to be set to True for this to work.'
     ),
 )
+_SORT_BY_ALT_ALLELE_SUPPORT = flags.DEFINE_boolean(
+    'sort_by_alt_allele_support',
+    False,
+    'If True, reads in the pileup image will be sorted primarily by the '
+    'alternate allele they support (from the variant call), then by '
+    'haplotype, then by position. Reads supporting reference or unlisted '
+    'alts will appear after reads supporting listed alts.',
+)
 _ADD_HP_CHANNEL = flags.DEFINE_bool(
     'add_hp_channel',
     False,
@@ -633,6 +649,8 @@ _ENABLE_METHYLATION_AWARE_PHASING = flags.DEFINE_bool(
     (
         '[Experimental] If True, enables methylation-aware phasing. '
         'This mode uses methylation information to phase reads. '
+        'With this option, the p-value for allele-specific methylation is '
+        'output as format field MI.\n '
         'Note: This feature is experimental and may change in future versions.'
     ),
 )
@@ -653,6 +671,14 @@ _PHASE_READS = flags.DEFINE_bool(
     False,
     'Calculate phases and add HP tag to all reads on a fly. --phase_reads'
     ' requires --track_ref_reads=True.',
+)
+_MIN_ALLELES_TO_PHASE = flags.DEFINE_integer(
+    'min_alleles_to_phase',
+    1,
+    (
+        'The minimum number of alleles on a read that must support a phase to'
+        ' be assigned that phase.'
+    ),
 )
 _PHASE_MAX_CANDIDATES = flags.DEFINE_integer(
     'phase_max_candidates',
@@ -750,6 +776,15 @@ _SMALL_MODEL_CALL_MULTIALLELICS = flags.DEFINE_bool(
     'small_model_call_multiallelics',
     True,
     'Allows the small model to call multiallelic candidate sites.',
+)
+_SMALL_MODEL_EMIT_ALL_CANDIDATES = flags.DEFINE_bool(
+    'small_model_emit_all_candidates',
+    False,
+    '[Experimental] When this flag is set, the small model classifies all'
+    ' candidates while also passing them along to the CNN for classification.'
+    ' These are resolved during postprocess_variants into separate VCF files'
+    ' per GQ threshold. The purpose is to explore the joint accuracy of the two'
+    ' models as a function of GQ thresholds.',
 )
 _SMALL_MODEL_INFERENCE_BATCH_SIZE = flags.DEFINE_integer(
     'small_model_inference_batch_size',
@@ -850,6 +885,65 @@ _OUTPUT_DEBUG_INFO = flags.DEFINE_bool(
     'If True, output debug info to the log.',
 )
 
+_ASSIGN_PHASE_FROM_NORMAL = flags.DEFINE_bool(
+    'assign_phase_from_normal',
+    False,
+    'If True, in a DeepSomatic run, use phase information from the normal '
+    'sample to assign phase to the tumor sample.',
+)
+_VSC_MIN_INDEL_FRACTION_FOR_SMALL_INDELS = flags.DEFINE_float(
+    'vsc_min_indel_fraction_for_small_indels',
+    0.0,
+    'If > 0, this flag along with vsc_min_indel_fraction_for_large_indels and '
+    'vsc_small_indel_threshold determines allele fraction for indels.',
+)
+_VSC_MIN_INDEL_FRACTION_FOR_LARGE_INDELS = flags.DEFINE_float(
+    'vsc_min_indel_fraction_for_large_indels',
+    0.0,
+    'If > 0, this flag along with vsc_min_indel_fraction_for_small_indels and '
+    'vsc_small_indel_threshold determines allele fraction for indels.',
+)
+_VSC_SMALL_INDEL_THRESHOLD = flags.DEFINE_integer(
+    'vsc_small_indel_threshold',
+    0,
+    'If > 0, this flag along with vsc_min_indel_fraction_for_small_indels and '
+    'vsc_min_indel_fraction_for_large_indels determines allele fraction for '
+    'indels.',
+)
+
+_USE_REJECTED_ALLELES = flags.DEFINE_bool(
+    'use_rejected_alleles',
+    False,
+    'If True, use read support information from rejected alleles in pileup.'
+    'This flag is only used when read_supports_variant_fuzzy channel is '
+    'enabled.',
+)
+_FILTER_LOW_VAF_CANDIDATES = flags.DEFINE_bool(
+    'filter_low_vaf_candidates',
+    False,
+    'If True, enables filtering of low VAF candidates based on quality '
+    'metrics and strand support, provided they have zero support in '
+    'non-target samples.',
+)
+_LOW_VAF_THRESHOLD = flags.DEFINE_float(
+    'low_vaf_threshold',
+    0.05,
+    'VAF threshold below which the low-VAF filter may be applied (if other '
+    'conditions are met).',
+)
+_LOW_VAF_MAX_BASE_QUALITY = flags.DEFINE_integer(
+    'low_vaf_max_base_quality',
+    30,
+    'If filtering low VAF candidates, filter candidate if average base quality '
+    'is less than this value.',
+)
+_LOW_VAF_MAX_MAPPING_QUALITY = flags.DEFINE_integer(
+    'low_vaf_max_mapping_quality',
+    30,
+    'If filtering low VAF candidates, filter candidate if average mapping '
+    'quality is less than this value.',
+)
+
 
 def shared_flags_to_options(
     add_flags: bool,
@@ -904,14 +998,23 @@ def shared_flags_to_options(
       small_model_call_multiallelics=_SMALL_MODEL_CALL_MULTIALLELICS.value,
       small_model_inference_batch_size=_SMALL_MODEL_INFERENCE_BATCH_SIZE.value,
       small_model_vaf_context_window_size=_SMALL_MODEL_VAF_CONTEXT_WINDOW_SIZE.value,
+      small_model_emit_all_candidates=_SMALL_MODEL_EMIT_ALL_CANDIDATES.value,
       downsample_classes=list(map(float, _DOWNSAMPLE_CLASSES.value)),
       sample_mean_coverage_on_calling_regions=_SAMPLE_MEAN_COVERAGE_ON_CALLING_REGIONS.value,
       enable_methylation_calling=_ENABLE_METHYLATION_CALLING.value,
       methylation_calling_threshold=_METHYLATION_CALLING_THRESHOLD.value,
       enable_methylation_aware_phasing=_ENABLE_METHYLATION_AWARE_PHASING.value,
+      assign_phase_from_normal=_ASSIGN_PHASE_FROM_NORMAL.value,
+      filter_low_vaf_candidates=_FILTER_LOW_VAF_CANDIDATES.value,
+      low_vaf_threshold=_LOW_VAF_THRESHOLD.value,
+      low_vaf_max_base_quality=_LOW_VAF_MAX_BASE_QUALITY.value,
+      low_vaf_max_mapping_quality=_LOW_VAF_MAX_MAPPING_QUALITY.value,
   )
 
   if add_flags:
+    if _USE_REJECTED_ALLELES.value:
+      options.use_rejected_alleles = _USE_REJECTED_ALLELES.value
+
     options.mode = make_examples_core.parse_proto_enum_flag(
         deepvariant_pb2.MakeExamplesOptions.Mode, _MODE.value.upper()
     )
@@ -953,30 +1056,11 @@ def shared_flags_to_options(
     channel_set = []
     channels_enum = None
     if make_examples_core.in_calling_mode(options) and flags_obj.checkpoint:
-      # --checkpoint flag may contain the path to saved model or a checkpoint.
-      # Example: --checkpoint=/some/path/to/saved_model/
-      # Example: --checkpoint=/some/path/to/checkpoint/model.ckpt
-      # The algorithm of calculating the path to example_info.json should
-      # handle all previous releases, both ckpt and saved model cases.
-      # We assume that the name is example_info.json if checkpoint flag points
-      # to a saved model.
-      # File name may vary if checkpoint is set with cktp path.
-      # If checkpoint is a directory containing saved_model.pb then it is a
-      # saved model.
-      if gfile.Exists(f'{_CHECKPOINT.value}/saved_model.pb'):
-        model_example_info_json = f'{_CHECKPOINT.value}/example_info.json'
-      else:
-        # checkpoint is a ckpt path. We need to strip the last part of the path
-        # to get the directory. Inside, we need to find the file which ends
-        # with example_info.json.
-        model_dir = os.path.dirname(_CHECKPOINT.value)
-        # We expect the json file to be in the same directory as the checkpoint.
-        model_example_info_json = f'{model_dir}/example_info.json'
-      if not gfile.Exists(model_example_info_json):
-        raise ValueError(
-            f'example_info.json not found in {_CHECKPOINT.value}. Please'
-            ' check the checkpoint path.'
-        )
+      model_example_info_json = (
+          make_examples_core.get_model_example_info_json_path(
+              _CHECKPOINT.value, _CHECKPOINT_JSON.value
+          )
+      )
       _, channels_enum, _ = dv_utils.get_shape_and_channels_from_json(
           f'{model_example_info_json}'
       )
@@ -1077,6 +1161,9 @@ def shared_flags_to_options(
       options.phase_reads_region_padding_pct = phase_region_padding
     if _PHASE_MAX_CANDIDATES.value:
       options.phase_max_candidates = _PHASE_MAX_CANDIDATES.value
+    options.direct_phasing_options.min_alleles_to_phase = (
+        _MIN_ALLELES_TO_PHASE.value
+    )
 
     options.pic_options.alt_aligned_pileup = _ALT_ALIGNED_PILEUP.value
     options.pic_options.types_to_alt_align = _TYPES_TO_ALT_ALIGN.value
@@ -1175,6 +1262,10 @@ def shared_flags_to_options(
         _HP_TAG_FOR_ASSEMBLY_POLISHING.value
     )
 
+    options.pic_options.sort_by_alt_allele_support = (
+        _SORT_BY_ALT_ALLELE_SUPPORT.value
+    )
+
     if _WRITE_RUN_INFO.value:
       options.run_info_filename = examples + _RUN_INFO_FILE_EXTENSION
 
@@ -1187,7 +1278,7 @@ def shared_flags_to_options(
 
     options.realigner_enabled = _REALIGN_READS.value
     options.max_read_length_to_realign = _MAX_READ_LENGTH_TO_REALIGN.value
-    options.trim_reads_for_pileup = _TRIM_READS_FOR_PILUP.value
+    options.trim_reads_for_pileup = _TRIM_READS_FOR_PILEUP.value
     if _ALT_ALIGNED_PILEUP.value and not options.trim_reads_for_pileup:
       logging.warning(
           'Automatically setting --trim_reads_for_pileup to True '
@@ -1394,6 +1485,37 @@ def check_options_are_valid(
             ),
             errors.CommandLineError,
         )
+
+  small_indels_frac = _VSC_MIN_INDEL_FRACTION_FOR_SMALL_INDELS.value
+  large_indels_frac = _VSC_MIN_INDEL_FRACTION_FOR_LARGE_INDELS.value
+  threshold = _VSC_SMALL_INDEL_THRESHOLD.value
+  new_flags_present = [
+      small_indels_frac > 0,
+      large_indels_frac > 0,
+      threshold > 0,
+  ]
+  if any(new_flags_present) and not all(new_flags_present):
+    errors.log_and_raise(
+        '--vsc_min_indel_fraction_for_small_indels, '
+        '--vsc_min_indel_fraction_for_large_indels, and '
+        '--vsc_small_indel_threshold must be specified together.'
+    )
+  if all(new_flags_present):
+    if not 0 < small_indels_frac < 1.0:
+      errors.log_and_raise(
+          '--vsc_min_indel_fraction_for_small_indels must be between 0 and 1.'
+      )
+    if not 0 < large_indels_frac < 1.0:
+      errors.log_and_raise(
+          '--vsc_min_indel_fraction_for_large_indels must be between 0 and 1.'
+      )
+    if threshold < 1:
+      errors.log_and_raise('--vsc_small_indel_threshold must be >= 1.')
+  if _VSC_MIN_FRACTION_INDELS.present and threshold > 0:
+    logging.warning(
+        'vsc_min_fraction_indels is ignored when vsc_small_indel_threshold is'
+        ' set.'
+    )
 
   multiplier = _VSC_MIN_FRACTION_MULTIPLIER.value
   if (multiplier <= 0 or multiplier > 1.0) and multiplier != float('inf'):

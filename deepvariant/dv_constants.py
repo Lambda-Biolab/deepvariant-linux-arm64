@@ -32,7 +32,7 @@ This file is for very general constants in the code that end up needing to be
 accessed in a variety of places, often in live code as well as throughout the
 code in tests.
 """
-
+import enum
 from deepvariant.protos import deepvariant_pb2
 
 # Default width [in basepairs] for our DeepVariant data tensor.
@@ -106,6 +106,12 @@ CHANNELS = [
     'mean_coverage',
     'base_methylation',
     'base_6ma',
+    'read_supports_variant_fuzzy',
+    'supplementary_alignment',
+    'allele_sample_probability',
+    'homopolymer_insertion_quality',
+    'homopolymer_deletion_quality',
+    'inter_homopolymer_insertion_quality',
 ]
 
 ALT_ALIGNED_PILEUP_CHANNELS = [
@@ -114,6 +120,20 @@ ALT_ALIGNED_PILEUP_CHANNELS = [
     'diff_channels_alternate_allele_1',
     'diff_channels_alternate_allele_2',
 ]
+
+
+class SampleAltAlignedPileupOption(enum.Enum):
+  """Enum for sample-specific alt aligned pileup options.
+
+  Note: Only row-alterting options can be configured per sample. Column-altering
+  options (such as base_channels and diff_channels) will always be applied to
+  all samples.
+  """
+
+  NONE = 'none'
+  SINGLE_ROW = 'single_row'
+  ROWS = 'rows'
+
 
 # Create list of channels that can be used with --channel_list by removing
 # channels specified using --alt_aligned_pileup.
@@ -154,6 +174,20 @@ CHANNEL_ENUM_TO_STRING = {
     deepvariant_pb2.CH_MEAN_COVERAGE: 'mean_coverage',
     deepvariant_pb2.CH_BASE_METHYLATION: 'base_methylation',
     deepvariant_pb2.CH_BASE_6MA: 'base_6ma',
+    deepvariant_pb2.CH_READ_SUPPORTS_VARIANT_FUZZY: (
+        'read_supports_variant_fuzzy'
+    ),
+    deepvariant_pb2.CH_SUPPLEMENTARY_ALIGNMENT: 'supplementary_alignment',
+    deepvariant_pb2.CH_ALLELE_SAMPLE_PROBABILITY: 'allele_sample_probability',
+    deepvariant_pb2.CH_HOMOPOLYMER_INSERTION_QUALITY: (
+        'homopolymer_insertion_quality'
+    ),
+    deepvariant_pb2.CH_HOMOPOLYMER_DELETION_QUALITY: (
+        'homopolymer_deletion_quality'
+    ),
+    deepvariant_pb2.CH_INTER_HOMOPOLYMER_INSERTION_QUALITY: (
+        'inter_homopolymer_insertion_quality'
+    ),
 }
 
 # Create a reverse mapping
@@ -166,3 +200,9 @@ STRING_TO_CHANNEL_ENUM = {
 # calculated over an extended region. Output examples are not affected by
 # this value.
 PHASE_READS_REGION_PADDING_PCT = 20
+PHASED_GENOTYPE = 'ALT_PS'
+VARIANT_PHASE_SET = 'PS_CONTIG'
+FIRST_VARIANT_IN_PHASE_SET = 'FIRST_VARIANT_IN_BLOCK'
+NULL_PHASE_SET_REGION_ID = -1
+NULL_PHASE_SET_SHARD_ID = -1
+NULL_PHASE_SET = (NULL_PHASE_SET_SHARD_ID, NULL_PHASE_SET_REGION_ID)

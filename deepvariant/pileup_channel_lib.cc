@@ -1,5 +1,3 @@
-
-
 /*
  * Copyright 2017 Google LLC.
  *
@@ -42,6 +40,7 @@
 #include <vector>
 
 #include "deepvariant/channels/allele_frequency_channel.h"
+#include "deepvariant/channels/allele_sample_probability_channel.h"
 #include "deepvariant/channels/avg_base_quality_channel.h"
 #include "deepvariant/channels/base_6ma_channel.h"
 #include "deepvariant/channels/base_differs_from_ref_channel.h"
@@ -52,15 +51,21 @@
 #include "deepvariant/channels/gap_compressed_identity_channel.h"
 #include "deepvariant/channels/gc_content_channel.h"
 #include "deepvariant/channels/haplotype_tag_channel.h"
+#include "deepvariant/channels/homopolymer_deletion_quality_channel.h"
+#include "deepvariant/channels/homopolymer_indel_quality_channel.h"
+#include "deepvariant/channels/homopolymer_insertion_quality_channel.h"
 #include "deepvariant/channels/homopolymer_weighted_channel.h"
 #include "deepvariant/channels/identity_channel.h"
 #include "deepvariant/channels/insert_size_channel.h"
+#include "deepvariant/channels/inter_homopolymer_insertion_quality_channel.h"
 #include "deepvariant/channels/is_homopolymer_channel.h"
 #include "deepvariant/channels/mapping_quality_channel.h"
 #include "deepvariant/channels/read_base_channel.h"
 #include "deepvariant/channels/read_mapping_percent_channel.h"
 #include "deepvariant/channels/read_supports_variant_channel.h"
+#include "deepvariant/channels/read_supports_variant_fuzzy_channel.h"
 #include "deepvariant/channels/strand_channel.h"
+#include "deepvariant/channels/supplementary_alignment_channel.h"
 #include "deepvariant/protos/deepvariant.pb.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
@@ -82,7 +87,6 @@ using learning::genomics::deepvariant::DeepVariantCall;
 namespace learning {
 namespace genomics {
 namespace deepvariant {
-
 
 bool Channels::CalculateChannels(
     ImageRow& img_row,
@@ -304,15 +308,6 @@ int Channels::getMaxEnumValue(
   }
   return maxEnumValue;
 }
-// Scales an input value to pixel range 0-254.
-std::uint8_t Channels::ScaleColor(int value, float max_val) {
-  if (static_cast<float>(value) > max_val) {
-    value = max_val;
-  }
-  return static_cast<int>(kMaxPixelValueAsFloat *
-                          (static_cast<float>(value) / max_val));
-}
-
 // Scales an input vector to pixel range 0-254
 std::vector<std::uint8_t> Channels::ScaleColorVector(
     std::vector<std::uint8_t>& channel_values, float max_val) {
@@ -389,6 +384,9 @@ std::unique_ptr<Channel> Channels::ChannelEnumToObject(
     case DeepVariantChannelEnum::CH_READ_SUPPORTS_VARIANT:
       return std::unique_ptr<Channel>(
           new ReadSupportsVariantChannel(width, options));
+    case DeepVariantChannelEnum::CH_READ_SUPPORTS_VARIANT_FUZZY:
+      return std::unique_ptr<Channel>(
+          new ReadSupportsVariantFuzzyChannel(width, options));
     case DeepVariantChannelEnum::CH_READ_MAPPING_PERCENT:
       return std::unique_ptr<Channel>(
           new ReadMappingPercentChannel(width, options));
@@ -424,11 +422,24 @@ std::unique_ptr<Channel> Channels::ChannelEnumToObject(
       return std::unique_ptr<Channel>(
           new BaseMethylationChannel(width, options));
     case DeepVariantChannelEnum::CH_BASE_6MA:
+      return std::unique_ptr<Channel>(new Base6mAChannel(width, options));
+    case DeepVariantChannelEnum::CH_SUPPLEMENTARY_ALIGNMENT:
       return std::unique_ptr<Channel>(
-          new Base6mAChannel(width, options));
+          new SupplementaryAlignmentChannel(width, options));
+    case DeepVariantChannelEnum::CH_ALLELE_SAMPLE_PROBABILITY:
+      return std::unique_ptr<Channel>(
+          new AlleleSampleProbabilityChannel(width, options));
+    case DeepVariantChannelEnum::CH_HOMOPOLYMER_INSERTION_QUALITY:
+      return std::unique_ptr<Channel>(
+          new HomopolymerInsertionQualityChannel(width, options));
+    case DeepVariantChannelEnum::CH_HOMOPOLYMER_DELETION_QUALITY:
+      return std::unique_ptr<Channel>(
+          new HomopolymerDeletionQualityChannel(width, options));
+    case DeepVariantChannelEnum::CH_INTER_HOMOPOLYMER_INSERTION_QUALITY:
+      return std::unique_ptr<Channel>(
+          new InterHomopolymerInsertionQualityChannel(width, options));
     default:
-      LOG(FATAL) << "Channel '"
-                 << DeepVariantChannelEnum_Name(channel_enum)
+      LOG(FATAL) << "Channel '" << DeepVariantChannelEnum_Name(channel_enum)
                  << "' is unimplemented and should have a corresponding "
                     "implementation.";
   }
@@ -443,6 +454,8 @@ DeepVariantChannelEnum Channels::ChannelStrToEnum(const std::string& channel) {
   if (channel == ch_strand) return DeepVariantChannelEnum::CH_STRAND;
   if (channel == ch_read_supports_variant)
     return DeepVariantChannelEnum::CH_READ_SUPPORTS_VARIANT;
+  if (channel == ch_read_supports_variant_fuzzy)
+    return DeepVariantChannelEnum::CH_READ_SUPPORTS_VARIANT_FUZZY;
   if (channel == ch_base_differs_from_ref)
     return DeepVariantChannelEnum::CH_BASE_DIFFERS_FROM_REF;
   if (channel == ch_read_mapping_percent)
@@ -479,6 +492,21 @@ DeepVariantChannelEnum Channels::ChannelStrToEnum(const std::string& channel) {
   }
   if (channel == ch_base_6ma) {
     return DeepVariantChannelEnum::CH_BASE_6MA;
+  }
+  if (channel == ch_supplementary_alignment) {
+    return DeepVariantChannelEnum::CH_SUPPLEMENTARY_ALIGNMENT;
+  }
+  if (channel == ch_allele_sample_probability) {
+    return DeepVariantChannelEnum::CH_ALLELE_SAMPLE_PROBABILITY;
+  }
+  if (channel == ch_homopolymer_insertion_quality) {
+    return DeepVariantChannelEnum::CH_HOMOPOLYMER_INSERTION_QUALITY;
+  }
+  if (channel == ch_homopolymer_deletion_quality) {
+    return DeepVariantChannelEnum::CH_HOMOPOLYMER_DELETION_QUALITY;
+  }
+  if (channel == ch_inter_homopolymer_insertion_quality) {
+    return DeepVariantChannelEnum::CH_INTER_HOMOPOLYMER_INSERTION_QUALITY;
   }
   CHECK(false) << "Channel '" << channel << "' should have a corresponding "
                << "enum in DeepVariantChannelEnum.";

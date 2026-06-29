@@ -32,34 +32,101 @@
 #ifndef LEARNING_GENOMICS_DEEPVARIANT_SAMPLING_UTIL_H_
 #define LEARNING_GENOMICS_DEEPVARIANT_SAMPLING_UTIL_H_
 
+#include <cstddef>
+#include <functional>
 #include <random>
+#include <utility>
 #include <vector>
 
+#include "absl/container/btree_set.h"
+#include "absl/random/distributions.h"
+#include "absl/random/random.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 
 namespace learning::genomics::deepvariant::sampling {
 
+namespace internal {
+
+//// Implementation of InPlaceReservoirSample, exposing the input randomness.
+// `index_provider` is a function that takes an index into the population vector
+// and returns the index of the element that should be swapped with the element
+// at that index.
+template <typename T>
+absl::btree_set<T> ReservoirSampleImpl(
+    int sample_size, std::function<size_t(size_t)> index_provider,
+    const absl::btree_set<T>& population) {
+  // If the population is already smaller than the sample size, return the size.
+  if (population.size() < sample_size) {
+    return absl::btree_set<T>(population);
+  }
+
+  std::vector<T> sampled(sample_size);
+  size_t index = 0;
+  auto it = population.begin();
+  for (; index < sample_size; ++it, ++index) {
+    sampled[index] = *it;
+  }
+
+  for (; it != population.end(); ++it, ++index) {
+    size_t swap_index = index_provider(index);
+    if (swap_index < sample_size) {
+      sampled[swap_index] = *it;
+    }
+  }
+  return absl::btree_set<T>(sampled.begin(), sampled.end());
+}
+
+template <typename T>
+absl::StatusOr<absl::btree_set<T>> SampleWithPartitionMinsImpl(
+    const absl::btree_set<absl::btree_set<T>>& partition, int sample_size,
+    int min_per_partition,
+    std::function<absl::btree_set<T>(const absl::btree_set<T>&, size_t)>
+        subset_provider) {
+  absl::btree_set<T> sampled;
+  absl::btree_set<T> unsampled;
+
+  // First get min_per_partition elements from each partition.
+  for (const auto& partition_elements : partition) {
+    auto sampled_elements =
+        subset_provider(partition_elements, min_per_partition);
+    auto unsampled_elements = partition_elements;
+    for (const auto& element : sampled_elements) {
+      unsampled_elements.erase(element);
+    }
+    sampled.merge(sampled_elements);
+    unsampled.merge(unsampled_elements);
+  }
+
+  // Complete the rest of the sample from the unsampled elements.
+  int remaining_to_sample = sample_size - sampled.size();
+  // If remaining_to_sample is negative, it means our threshold per allele
+  // results in more than sample_size.
+  if (remaining_to_sample < 0) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Threshold of ", min_per_partition,
+        " per partition results in more than sample_size elements."));
+  }
+  auto sampled_elements = subset_provider(unsampled, remaining_to_sample);
+  sampled.merge(sampled_elements);
+  return sampled;
+}
+
+}  // namespace internal
+
 //// Attempts to sample sample_size elements from the population without
 /// replacement. If sample_size is larger than the population, the
 /// entire population is returned. Sampling is done in place, as a prefix of the
-/// population vector.
+/// population vector, and each possible sample is chosen uniformly at random.
 template <typename T>
-int InPlaceReservoirSample(std::vector<T>& population, int sample_size,
-                           std::mt19937_64& gen) {
-  // If the vector is already smaller than the sample size, return the size.
-  if (population.size() < sample_size) {
-    return population.size();
-  }
-  for (int index = sample_size; index < population.size(); ++index) {
-    std::uniform_int_distribution<> dist(0, index);
-    int random_index = dist(gen);
-    if (random_index < sample_size) {
-      std::swap(population[random_index], population[index]);
-    }
-  }
-  return sample_size;
+absl::btree_set<T> ReservoirSample(int sample_size, std::mt19937_64& gen,
+                                   const absl::btree_set<T>& population) {
+  auto uniform_index_dist = [&gen](size_t max) {
+    return absl::Uniform<size_t>(absl::IntervalClosed, gen, 0, max);
+  };
+  return internal::ReservoirSampleImpl(sample_size, uniform_index_dist,
+                                       population);
 }
 
 //// Samples from a family of vectors, where each vector represents a partition.
@@ -77,34 +144,16 @@ int InPlaceReservoirSample(std::vector<T>& population, int sample_size,
 /// choose 2 elements from the union of the remaining 4 elements. This choice
 /// will be balanced 2/3 of the time.
 template <typename T>
-absl::StatusOr<std::vector<T>> SampleWithPartitionMins(
-    std::vector<std::vector<T>> partition, int sample_size,
+absl::StatusOr<absl::btree_set<T>> SampleWithPartitionMins(
+    absl::btree_set<absl::btree_set<T>> partition, int sample_size,
     int min_per_partition, std::mt19937_64& gen) {
-  std::vector<T> sampled;
-  std::vector<T> unsampled;
-
-  // First get min_per_partition from each partition.
-  for (auto& partition_elements : partition) {
-    int index =
-        InPlaceReservoirSample(partition_elements, min_per_partition, gen);
-    sampled.insert(sampled.end(), partition_elements.begin(),
-                   partition_elements.begin() + index);
-    unsampled.insert(unsampled.end(), partition_elements.begin() + index,
-                     partition_elements.end());
-  }
-
-  // Complete the rest of the sample from the unsampled elements.
-  int remaining_to_sample = sample_size - sampled.size();
-  // If remaining_to_sample is negative, it means our threshold per allele
-  // results in more than sample_size.
-  if (remaining_to_sample < 0) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "Threshold of ", min_per_partition,
-        " per partition results in more than sample_size elements."));
-  }
-  int index = InPlaceReservoirSample(unsampled, remaining_to_sample, gen);
-  sampled.insert(sampled.end(), unsampled.begin(), unsampled.begin() + index);
-  return sampled;
+  std::function<absl::btree_set<T>(const absl::btree_set<T>&, size_t)>
+      uniform_subset_provider =
+          [&gen](const absl::btree_set<T>& population, size_t num_to_sample) {
+            return ReservoirSample(num_to_sample, gen, population);
+          };
+  return internal::SampleWithPartitionMinsImpl(
+      partition, sample_size, min_per_partition, uniform_subset_provider);
 }
 
 }  // namespace learning::genomics::deepvariant::sampling

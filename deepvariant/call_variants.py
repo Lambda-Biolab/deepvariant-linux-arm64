@@ -60,6 +60,7 @@ from third_party.nucleus.protos import variants_pb2
 from third_party.nucleus.util import errors
 from third_party.nucleus.util import proto_utils
 from third_party.nucleus.util import variant_utils
+from third_party.nucleus.util import variantcall_utils
 from third_party.nucleus.util import vis
 
 
@@ -79,6 +80,8 @@ _LOG_EVERY_N_BATCHES = 50
 
 _DEFAULT_INPUT_READ_THREADS = 32
 _DEFAULT_PREFETCH_BUFFER_BYTES = 16 * 1000 * 1000
+
+DEEP_VARIANT_MODEL_ID = 'deepvariant'
 
 FLAGS = flags.FLAGS
 
@@ -219,11 +222,11 @@ _ALLOW_EMPTY_EXAMPLES = flags.DEFINE_boolean(
     ' reasonably happen when the small model is used, or when processing a'
     ' small region.',
 )
+
 _USE_ONNX = flags.DEFINE_boolean(
     'use_onnx',
     False,
     'Use ONNX Runtime for inference instead of TensorFlow. '
-    'Provides 1.5-2.5x speedup on ARM64 with ACL execution provider. '
     'Requires --onnx_model to be set.',
 )
 _ONNX_MODEL = flags.DEFINE_string(
@@ -245,7 +248,6 @@ _ONNX_INTER_OP_THREADS = flags.DEFINE_integer(
     'independent graph nodes, e.g. InceptionV3 parallel branches). '
     'Default 1. Try 2-4 with reduced intra_op_threads for potential gains.',
 )
-
 
 class ExecutionHardwareError(Exception):
   pass
@@ -417,6 +419,8 @@ def _create_cvo_proto(
       genotype_probabilities=gls,
       debug_info=debug_info,
   )
+  variant_call = call_variants_output.variant.calls[0]
+  variantcall_utils.set_model_id(variant_call, DEEP_VARIANT_MODEL_ID)
   return call_variants_output
 
 
@@ -471,7 +475,7 @@ def get_dataset(
     path,
     example_shape,
     channel_indices,
-    batch_size,
+    global_batch_size,
     include_debug_info,
     debugging_true_label_mode,
     use_data_from_stream=False,
@@ -502,7 +506,7 @@ def get_dataset(
     image = dv_utils.preprocess_images(image, channel_indices)
     variant = parsed_features['variant/encoded']
     alt_allele_indices = parsed_features['alt_allele_indices/encoded']
-    optional_label = None
+    optional_label = tf.constant([-1], dtype=tf.int64)
     if debugging_true_label_mode:
       optional_label = parsed_features['label']
     return image_encoded, image, variant, alt_allele_indices, optional_label
@@ -523,7 +527,7 @@ def get_dataset(
         map_func=_parse_example_from_stream, num_parallel_calls=tf.data.AUTOTUNE
     )
     enc_image_variant_alt_allele_ds = enc_image_variant_alt_allele_ds.batch(
-        batch_size=batch_size
+        batch_size=global_batch_size
     ).prefetch(tf.data.AUTOTUNE)
     return enc_image_variant_alt_allele_ds
   # Dataset from TFRecord files.
@@ -533,13 +537,11 @@ def get_dataset(
         shuffle=False,
     )
 
-    compression = 'GZIP' if path.endswith('.gz') else ''
-
     def load_dataset(filename):
       dataset = tf.data.TFRecordDataset(
           filename,
           buffer_size=_DEFAULT_PREFETCH_BUFFER_BYTES,
-          compression_type=compression,
+          compression_type='GZIP',
       )
       return dataset
 
@@ -556,7 +558,7 @@ def get_dataset(
     )
 
     enc_image_variant_alt_allele_ds = enc_image_variant_alt_allele_ds.batch(
-        batch_size=batch_size
+        batch_size=global_batch_size
     ).prefetch(tf.data.AUTOTUNE)
     return enc_image_variant_alt_allele_ds
 
@@ -575,8 +577,7 @@ def post_processing(
     include_debug_info: If true, include debug information.
     debugging_true_label_mode: If true, include true label from the example.
   """
-  cvo_compression = 'GZIP' if output_file.endswith('.gz') else ''
-  writer = tfrecord.Writer(output_file, compression_type=cvo_compression)
+  writer = tfrecord.Writer(output_file, compression_type='GZIP')
   n_examples = 0
   n_batches = 0
   while True:
@@ -635,18 +636,38 @@ def write_empty_output_file(examples_filename: str, output_file: str) -> None:
   )
   # Write empty shards
   total_writer_process = 1
-  if '.tfrecord.gz' in output_file:
-    output_file = output_file.replace(
-        '.tfrecord.gz', '@' + str(total_writer_process) + '.tfrecord.gz'
-    )
-  else:
-    output_file = output_file.replace(
-        '.tfrecord', '@' + str(total_writer_process) + '.tfrecord'
-    )
-  empty_compression = 'GZIP' if output_file.endswith('.gz') else ''
+  output_file = output_file.replace(
+      '.tfrecord.gz', '@' + str(total_writer_process) + '.tfrecord.gz'
+  )
   paths = sharded_file_utils.maybe_generate_sharded_filenames(output_file)
   for path in paths:
-    tfrecord.write_tfrecords([], path, compression_type=empty_compression)
+    tfrecord.write_tfrecords([], path, compression_type='GZIP')
+
+
+def get_model_example_info_json(model_example_info_json_dir: str) -> str:
+  """Returns the model example info json file."""
+  model_example_info_json = os.path.join(
+      model_example_info_json_dir, 'model.example_info.json'
+  )
+  if tf.io.gfile.exists(model_example_info_json):
+    return model_example_info_json
+
+  # Try for example_info.json next for backwards compatibility. Eventually, we
+  # should remove this.
+  logging.info(
+      'model.example_info.json file not found in %s. '
+      'Try for example_info.json next.',
+      model_example_info_json_dir,
+  )
+  model_example_info_json = os.path.join(
+      model_example_info_json_dir, 'example_info.json'
+  )
+  if tf.io.gfile.exists(model_example_info_json):
+    return model_example_info_json
+  raise ValueError(
+      'model.example_info.json and example_info.json both do not exist in'
+      f' {model_example_info_json_dir}.'
+  )
 
 
 def load_model_and_check_shape(
@@ -681,7 +702,7 @@ def load_model_and_check_shape(
 
   if use_saved_model:
     model = tf.saved_model.load(checkpoint_path)
-    model_example_info_json = f'{checkpoint_path}/example_info.json'
+    model_example_info_json = get_model_example_info_json(checkpoint_path)
     model_example_shape, _, channel_indices = (
         dv_utils.get_shape_and_channels_from_json(model_example_info_json)
     )
@@ -742,7 +763,7 @@ def load_model_and_check_shape(
     else:
       raise ValueError(
           'Could not infer example shape from examples or model directory. '
-          'example_info.json was not found in the model directory.'
+          'model.example_info.json was not found in the model directory.'
       )
 
     # If we are using channel ablation, the example shape of incoming
@@ -787,6 +808,7 @@ def call_variants(
     onnx_inter_op_threads: int = 1,
 ):
   """Main driver of call_variants."""
+
   first_example = None
   if not use_dataset_from_stream:
     first_example = dv_utils.get_one_example_from_examples_path(
@@ -835,64 +857,19 @@ def call_variants(
       )
     paths = sharded_file_utils.maybe_generate_sharded_filenames(output_file)
 
-  writer_queues = []
-  for _ in range(total_writer_process):
-    writer_queues.append(multiprocessing.Queue())
-  writer_queues_iterator = itertools.cycle(writer_queues)
-
-  all_processes = []
-  for process_id in range(0, total_writer_process):
-    post_processing_process = multiprocessing.get_context().Process(
-        target=post_processing,
-        args=(
-            paths[process_id],
-            writer_queues[process_id],
-            include_debug_info,
-            debugging_true_label_mode,
-        ),
-    )
-    all_processes.append(post_processing_process)
-    post_processing_process.start()
-
-  logging.info('Total %d writing processes started.', len(all_processes))
-
   if kmp_blocktime:
     os.environ['KMP_BLOCKTIME'] = kmp_blocktime
     logging.vlog(
         3, 'Set KMP_BLOCKTIME to {}'.format(os.environ['KMP_BLOCKTIME'])
     )
 
-  use_saved_model = tf.io.gfile.exists(checkpoint_path) and tf.io.gfile.exists(
-      f'{checkpoint_path}/saved_model.pb'
-  )
-  logging.info('Use saved model: %s', str(use_saved_model))
-
-  if checkpoint_path is None:
-    raise ValueError('Checkpoint filename must be specified.')
-
-  channel_indices = []
-  if not use_saved_model:
-    if not os.path.isdir(checkpoint_path):
-      example_info_json_path = os.path.join(
-          os.path.dirname(checkpoint_path), 'example_info.json'
-      )
-    else:
-      example_info_json_path = os.path.join(
-          checkpoint_path, 'example_info.json'
-      )
-    example_info = json.loads(tf.io.gfile.GFile(example_info_json_path).read())
-
-    for idx, channel_enum in enumerate(example_info['channels']):
-      if channel_enum not in example_info.get('ablation_channels', []):
-        channel_indices.append(idx)
-
-  # ONNX Runtime session setup (ARM64 acceleration)
-  onnx_session = None
-  onnx_input_name = None
-  model = None
+  # ------------------------------------------------------------------
+  # ONNX Runtime path: simple CPU inference, no MirroredStrategy
+  # ------------------------------------------------------------------
   if use_onnx:
     if not onnx_model:
       raise ValueError('--onnx_model is required when --use_onnx is True.')
+
     # Get example shape without loading the TF model.
     example_info_json = dv_utils.get_example_info_json_filename(
         examples_filename, 0
@@ -902,8 +879,10 @@ def call_variants(
     )
     if example_shape is None:
       example_shape = dv_utils.example_image_shape(first_example)
+
     import onnxruntime as ort
-    # Parse version safely — handles suffixes like "1.17.0.post1".
+
+    # Parse version safely -- handles suffixes like "1.17.0.post1".
     _ort_ver = tuple(
         int(p) for p in ort.__version__.split('.')[:2] if p.isdigit()
     )
@@ -912,177 +891,396 @@ def call_variants(
           'ONNX Runtime %s may lack ARM64 INT8 MLAS kernels (need >= 1.17). '
           'INT8 models may fall back to slow scalar reference implementation.',
           ort.__version__)
+
     providers = ['ACLExecutionProvider', 'CPUExecutionProvider']
     available = ort.get_available_providers()
     providers = [p for p in providers if p in available]
     logging.info('ONNX Runtime providers: %s', providers)
+
     sess_options = ort.SessionOptions()
-    intra = onnx_intra_op_threads if onnx_intra_op_threads > 0 else multiprocessing.cpu_count()
+    intra = (
+        onnx_intra_op_threads
+        if onnx_intra_op_threads > 0
+        else multiprocessing.cpu_count()
+    )
     sess_options.intra_op_num_threads = intra
     sess_options.inter_op_num_threads = onnx_inter_op_threads
-    # Enable extended graph optimizations (Conv+BN fusion, GEMM+Activation
-    # fusion, constant folding). Default is ORT_ENABLE_BASIC.
-    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    logging.info('ONNX threads: intra_op=%d, inter_op=%d', intra, onnx_inter_op_threads)
+    sess_options.graph_optimization_level = (
+        ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    )
+    logging.info(
+        'ONNX threads: intra_op=%d, inter_op=%d',
+        intra,
+        onnx_inter_op_threads,
+    )
     # Enable BF16 fast math on Graviton3+ (Neoverse V1/V2 with BF16 support).
     # No effect on hardware without BF16 (e.g. Neoverse-N1).
     sess_options.add_session_config_entry(
         'mlas.enable_gemm_fastmath_arm64_bfloat16', '1'
     )
     onnx_session = ort.InferenceSession(
-        onnx_model, sess_options, providers=providers)
+        onnx_model, sess_options, providers=providers
+    )
     onnx_input_name = onnx_session.get_inputs()[0].name
-    logging.info('ONNX model loaded: %s (input: %s, shape: %s)',
-                 onnx_model, onnx_input_name,
-                 onnx_session.get_inputs()[0].shape)
+    logging.info(
+        'ONNX model loaded: %s (input: %s, shape: %s)',
+        onnx_model,
+        onnx_input_name,
+        onnx_session.get_inputs()[0].shape,
+    )
     # Warm up ONNX Runtime with a dummy forward pass to trigger JIT kernel
-    # compilation and memory planning. Without this, the first real batch
-    # includes one-time setup overhead that contaminates benchmarks.
+    # compilation and memory planning.
     warmup_input = np.zeros([1] + list(example_shape), dtype=np.float32)
     _ = onnx_session.run(None, {onnx_input_name: warmup_input})
     logging.info('Warmed up ONNX Runtime inference session.')
-  else:
-    example_shape, model = load_model_and_check_shape(
-        checkpoint_path,
-        examples_filename,
-        first_example,
-        use_saved_model,
-        _STREAM_EXAMPLES.value,
-    )
 
-  if not example_shape:
-    raise ValueError(
-        'Could not infer example shape from examples or model directory.'
-    )
-
-  # Warm up the SavedModel with a dummy batch to trigger Grappler
-  # optimizations (BatchNorm folding, op fusion, kernel caching).
-  concrete_fn = None
-  if use_saved_model and not use_onnx and model is not None:
-    infer_fn = model.signatures['serving_default']
-    warmup_input = tf.zeros([1] + list(example_shape), dtype=tf.float32)
-    _ = infer_fn(warmup_input)
-    concrete_fn = infer_fn
-    logging.info('Warmed up SavedModel inference function.')
-
-  logging.info('example_shape: %s', example_shape)
-  enc_image_variant_alt_allele_ds = get_dataset(
-      examples_filename,
-      example_shape,
-      channel_indices,
-      batch_size,
-      include_debug_info,
-      debugging_true_label_mode,
-      use_dataset_from_stream,
-      shm_prefix,
-      num_shards,
-  )
-
-  activation_model = model
-  if include_debug_info and activation_layers:
-    if not use_saved_model:
-      activation_model = modeling.get_activations_model(
-          model, activation_layers
+    if not example_shape:
+      raise ValueError(
+          'Could not infer example shape from examples or model directory.'
       )
 
-  batch_no = 0
-  n_examples = 0
-  n_batches = 0
-  start_time = time.time()
-  for (
-      image_encodes,
-      images_in_batch,
-      variants,
-      alt_allele_indices_list,
-      optional_label_list,
-  ) in enc_image_variant_alt_allele_ds:
-    # These elements per iteration are read from the `get_dataset` function,
-    # specifically the `_parse_example` function within it.
-    if use_onnx:
-      # Ensure contiguous memory layout for ORT — non-contiguous tensors
-      # (e.g. from slicing) would cause a silent per-batch copy.
+    logging.info('example_shape: %s', example_shape)
+    enc_image_variant_alt_allele_ds = get_dataset(
+        examples_filename,
+        example_shape,
+        [],
+        batch_size,
+        include_debug_info,
+        debugging_true_label_mode,
+        use_dataset_from_stream,
+        shm_prefix,
+        num_shards,
+    )
+
+    # Writer queues
+    writer_queues = []
+    for _ in range(total_writer_process):
+      writer_queues.append(multiprocessing.Queue())
+    writer_queues_iterator = itertools.cycle(writer_queues)
+
+    all_processes = []
+    for process_id in range(0, total_writer_process):
+      post_processing_process = multiprocessing.get_context().Process(
+          target=post_processing,
+          args=(
+              paths[process_id],
+              writer_queues[process_id],
+              include_debug_info,
+              debugging_true_label_mode,
+          ),
+      )
+      all_processes.append(post_processing_process)
+      post_processing_process.start()
+
+    logging.info('Total %d writing processes started.', len(all_processes))
+
+    # ONNX prediction loop (simple, no strategy)
+    batch_no = 0
+    n_examples = 0
+    n_batches = 0
+    start_time = time.time()
+    for (
+        image_encodes,
+        images_in_batch,
+        variants,
+        alt_allele_indices_list,
+        optional_label_list,
+    ) in enc_image_variant_alt_allele_ds:
+      # Ensure contiguous memory layout for ORT.
       predictions = onnx_session.run(
-          None, {onnx_input_name: np.ascontiguousarray(
-              images_in_batch.numpy())})[0]
+          None,
+          {
+              onnx_input_name: np.ascontiguousarray(
+                  images_in_batch.numpy()
+              )
+          },
+      )[0]
       # INT8 quantized models may produce probabilities that don't sum to
-      # exactly 1.0 due to quantization error. Renormalize to prevent
-      # round_gls from rejecting valid predictions.
+      # exactly 1.0 due to quantization error. Renormalize.
       row_sums = predictions.sum(axis=1, keepdims=True)
       predictions = predictions / row_sums
-    elif use_saved_model:
-      if concrete_fn is not None:
-        predictions = concrete_fn(images_in_batch)
-      else:
-        predictions = model.signatures['serving_default'](images_in_batch)
-      predictions = predictions['classification'].numpy()
-    else:
-      if not is_gpu_available:
-        # This is faster on CPU but slower on GPU.
-        predictions = model.predict_on_batch(images_in_batch)
-      else:
-        # This is faster on GPU but slower on CPU.
-        predictions = model(images_in_batch, training=False).numpy()
 
-    layer_outputs = {}
-    if include_debug_info and activation_layers:
-      if not use_saved_model:
-        if not is_gpu_available:
-          # This is faster on CPU but slower on GPU.
-          layer_outputs = activation_model.predict_on_batch(images_in_batch)
-        else:
-          # This is faster on GPU but slower on CPU.
-          layer_outputs = activation_model(images_in_batch, training=False)
-          layer_outputs = {
-              layer_name: output.numpy()
-              for layer_name, output in layer_outputs.items()
-          }
-      else:
+      layer_outputs = {}
+      if include_debug_info and activation_layers:
         logging.warning(
-            'Activation layers: %s are not saved in CVO. Change to ckpt'
-            'model file to get activation layers outputs.',
-            ','.join(activation_layers),
+            'Activation layers are not available with ONNX inference.',
         )
 
-    pileup_curation_in_batch = None
-    if include_debug_info:
-      pileup_curation_in_batch = [
-          vis.curate_pileup(
-              vis.split_3d_array_into_channels(
-                  dv_utils.unpreprocess_images(image.numpy())
-              )
-          )
-          for image in images_in_batch
-      ]
-    batch_no += 1
-    duration = time.time() - start_time
-    n_examples += len(predictions)
-    n_batches += 1
-    logging.log_every_n(
-        logging.INFO,
-        'Predicted %s examples in %s batches [%.3f sec per 100].',
-        _LOG_EVERY_N_BATCHES,
-        n_examples,
-        n_batches,
-        (100 * duration) / n_examples,
-    )
-    if optional_label_list is not None:
-      optional_label_list = optional_label_list.numpy()
-    next(writer_queues_iterator).put((
-        predictions,
-        image_encodes.numpy(),
-        variants.numpy(),
-        alt_allele_indices_list.numpy(),
-        optional_label_list,
-        layer_outputs,
-        pileup_curation_in_batch,
-    ))
+      pileup_curation_in_batch = None
+      if include_debug_info:
+        pileup_curation_in_batch = [
+            vis.curate_pileup(
+                vis.split_3d_array_into_channels(
+                    dv_utils.unpreprocess_images(image.numpy())
+                )
+            )
+            for image in images_in_batch
+        ]
+      batch_no += 1
+      duration = time.time() - start_time
+      n_examples += len(predictions)
+      n_batches += 1
+      logging.log_every_n(
+          logging.INFO,
+          'Predicted %s examples in %s batches [%.3f sec per 100].',
+          _LOG_EVERY_N_BATCHES,
+          n_examples,
+          n_batches,
+          (100 * duration) / n_examples if n_examples > 0 else 0.0,
+      )
+      if optional_label_list is not None:
+        optional_label_list = optional_label_list.numpy()
+      next(writer_queues_iterator).put((
+          predictions,
+          image_encodes.numpy(),
+          variants.numpy(),
+          alt_allele_indices_list.numpy(),
+          optional_label_list,
+          layer_outputs,
+          pileup_curation_in_batch,
+      ))
 
-  # Put none values in each queue so the running processes can terminate.
+  # ------------------------------------------------------------------
+  # TensorFlow path: MirroredStrategy for GPU/multi-device support
+  # ------------------------------------------------------------------
+  else:
+    strategy = tf.distribute.MirroredStrategy()
+    logging.info('Number of devices: %d', strategy.num_replicas_in_sync)
+
+    global_batch_size = batch_size * strategy.num_replicas_in_sync
+    logging.info(
+        'Per-replica batch size is %d. Global batch size is %d.',
+        batch_size,
+        global_batch_size,
+    )
+
+    with strategy.scope():
+      use_saved_model = tf.io.gfile.exists(
+          checkpoint_path
+      ) and tf.io.gfile.exists(f'{checkpoint_path}/saved_model.pb')
+      logging.info('Use saved model: %s', str(use_saved_model))
+
+      if checkpoint_path is None:
+        raise ValueError('Checkpoint filename must be specified.')
+
+      channel_indices = []
+      if not use_saved_model:
+        if not os.path.isdir(checkpoint_path):
+          example_info_json_path_dir = os.path.dirname(checkpoint_path)
+        else:
+          example_info_json_path_dir = checkpoint_path
+        example_info_json_path = get_model_example_info_json(
+            example_info_json_path_dir
+        )
+        example_info = json.loads(
+            tf.io.gfile.GFile(example_info_json_path).read()
+        )
+
+        for idx, channel_enum in enumerate(example_info['channels']):
+          if channel_enum not in example_info.get('ablation_channels', []):
+            channel_indices.append(idx)
+
+      example_shape, model = load_model_and_check_shape(
+          checkpoint_path,
+          examples_filename,
+          first_example,
+          use_saved_model,
+          _STREAM_EXAMPLES.value,
+      )
+
+      if not example_shape:
+        raise ValueError(
+            'Could not infer example shape from examples or model directory.'
+        )
+
+      # Warm up the SavedModel with a dummy batch to trigger Grappler
+      # optimizations (BatchNorm folding, op fusion, kernel caching).
+      concrete_fn = None
+      if use_saved_model and model is not None:
+        infer_fn = model.signatures['serving_default']
+        warmup_input = tf.zeros([1] + list(example_shape), dtype=tf.float32)
+        _ = infer_fn(warmup_input)
+        concrete_fn = infer_fn
+        logging.info('Warmed up SavedModel inference function.')
+
+      activation_model = model
+      if include_debug_info and activation_layers:
+        if not use_saved_model:
+          activation_model = modeling.get_activations_model(
+              model, activation_layers
+          )
+
+    logging.info('example_shape: %s', example_shape)
+    enc_image_variant_alt_allele_ds = get_dataset(
+        examples_filename,
+        example_shape,
+        channel_indices,
+        global_batch_size,
+        include_debug_info,
+        debugging_true_label_mode,
+        use_dataset_from_stream,
+        shm_prefix,
+        num_shards,
+    )
+
+    dist_dataset = strategy.experimental_distribute_dataset(
+        enc_image_variant_alt_allele_ds
+    )
+
+    @tf.function
+    def predict_step(inputs):
+      (
+          image_encodes,
+          images_in_batch,
+          variants,
+          alt_allele_indices_list,
+          optional_label_list,
+      ) = inputs
+      if use_saved_model:
+        predictions = model.signatures['serving_default'](images_in_batch)[
+            'classification'
+        ]
+      else:
+        predictions = model(images_in_batch, training=False)
+
+      layer_outputs = {}
+      if include_debug_info and activation_layers:
+        if not use_saved_model:
+          layer_outputs = activation_model(images_in_batch, training=False)
+      return (
+          predictions,
+          image_encodes,
+          images_in_batch,
+          variants,
+          alt_allele_indices_list,
+          optional_label_list,
+          layer_outputs,
+      )
+
+    # Writer queues
+    writer_queues = []
+    for _ in range(total_writer_process):
+      writer_queues.append(multiprocessing.Queue())
+    writer_queues_iterator = itertools.cycle(writer_queues)
+
+    all_processes = []
+    for process_id in range(0, total_writer_process):
+      post_processing_process = multiprocessing.get_context().Process(
+          target=post_processing,
+          args=(
+              paths[process_id],
+              writer_queues[process_id],
+              include_debug_info,
+              debugging_true_label_mode,
+          ),
+      )
+      all_processes.append(post_processing_process)
+      post_processing_process.start()
+
+    logging.info('Total %d writing processes started.', len(all_processes))
+
+    # TF prediction loop (MirroredStrategy with dist_dataset)
+    batch_no = 0
+    n_examples = 0
+    n_batches = 0
+    start_time = time.time()
+
+    for distributed_inputs in dist_dataset:
+      (
+          predictions_per_replica,
+          image_encodes_per_replica,
+          images_in_batch_per_replica,
+          variants_per_replica,
+          alt_allele_indices_list_per_replica,
+          optional_label_list_per_replica,
+          layer_outputs_per_replica,
+      ) = strategy.run(predict_step, args=(distributed_inputs,))
+
+      for i in range(strategy.num_replicas_in_sync):
+        local_predictions = strategy.experimental_local_results(
+            predictions_per_replica
+        )[i]
+        if tf.equal(tf.size(local_predictions), 0):
+          continue
+
+        predictions = local_predictions.numpy()
+        image_encodes = strategy.experimental_local_results(
+            image_encodes_per_replica
+        )[i].numpy()
+        images_in_batch = strategy.experimental_local_results(
+            images_in_batch_per_replica
+        )[i]
+        variants = strategy.experimental_local_results(variants_per_replica)[
+            i
+        ].numpy()
+        alt_allele_indices_list = strategy.experimental_local_results(
+            alt_allele_indices_list_per_replica
+        )[i].numpy()
+        optional_label_list_local = strategy.experimental_local_results(
+            optional_label_list_per_replica
+        )[i]
+        optional_label_list = (
+            optional_label_list_local.numpy()
+            if optional_label_list_local is not None
+            else None
+        )
+
+        layer_outputs = {}
+        if include_debug_info and activation_layers:
+          if not use_saved_model:
+            layer_outputs_local = strategy.experimental_local_results(
+                layer_outputs_per_replica
+            )[i]
+            layer_outputs = {
+                layer_name: output.numpy()
+                for layer_name, output in layer_outputs_local.items()
+            }
+          else:
+            logging.warning(
+                'Activation layers: %s are not saved in CVO. Change to ckpt'
+                'model file to get activation layers outputs.',
+                ','.join(activation_layers),
+            )
+
+        pileup_curation_in_batch = None
+        if include_debug_info:
+          pileup_curation_in_batch = [
+              vis.curate_pileup(
+                  vis.split_3d_array_into_channels(
+                      dv_utils.unpreprocess_images(image.numpy())
+                  )
+              )
+              for image in images_in_batch
+          ]
+        batch_no += 1
+        duration = time.time() - start_time
+        n_examples += len(predictions)
+        n_batches += 1
+        logging.log_every_n(
+            logging.INFO,
+            'Predicted %s examples in %s batches [%.3f sec per 100].',
+            _LOG_EVERY_N_BATCHES,
+            n_examples,
+            n_batches,
+            (100 * duration) / n_examples if n_examples > 0 else 0.0,
+        )
+        next(writer_queues_iterator).put((
+            predictions,
+            image_encodes,
+            variants,
+            alt_allele_indices_list,
+            optional_label_list,
+            layer_outputs,
+            pileup_curation_in_batch,
+        ))
+
+  # ------------------------------------------------------------------
+  # Common post-loop cleanup
+  # ------------------------------------------------------------------
   for queue in writer_queues:
     queue.put(None)
   for post_processing_process in all_processes:
     post_processing_process.join()
-
 
 def main(argv=()):
   env = os.environ.copy()
@@ -1149,3 +1347,4 @@ if __name__ == '__main__':
   ])
   logging.use_python_logging()
   app.run(main)
+

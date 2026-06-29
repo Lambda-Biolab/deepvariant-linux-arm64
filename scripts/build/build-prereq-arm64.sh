@@ -97,10 +97,12 @@ sed -i -e 's|patch_file = \["//third_party/absl:absl_designated_initializers.pat
 # Update tensorflow.bzl (same as upstream)
 patch ../tensorflow/tensorflow/tensorflow.bzl "${DV_DIR}"/third_party/tensorflow.bzl.patch
 
-# Update pybind11 (same as upstream)
-sed -i -e 's|v2.10.0.tar.gz|a7b91e33269ab6f3f90167291af2c4179fc878f5.zip|g' ../tensorflow/tensorflow/workspace2.bzl
-sed -i -e 's|eacf582fa8f696227988d08cfc46121770823839fe9e301a20fbce67e7cd70ec|09d2ab67e91457c966eb335b361bdc4d27ece2d4dea681d22e5d8307e0e0c023|g' ../tensorflow/tensorflow/workspace2.bzl
-sed -i -e 's|pybind11-2.10.0|pybind11-a7b91e33269ab6f3f90167291af2c4179fc878f5|g' ../tensorflow/tensorflow/workspace2.bzl
+# Update pybind11 to a commit that includes gil_safe_call_once.h (needed by
+# nucleus type_caster_nucleus_proto_ptr.h). TF v2.16.1 ships pybind11 v2.10.4
+# which predates gil_safe_call_once.h (introduced in pybind11 v2.13.0).
+sed -i -e 's|v2.10.4.tar.gz|a7b91e33269ab6f3f90167291af2c4179fc878f5.zip|g' ../tensorflow/tensorflow/workspace2.bzl
+sed -i -e 's|832e2f309c57da9c1e6d4542dedd34b24e4192ecb4d62f6f4866a737454c9970|09d2ab67e91457c966eb335b361bdc4d27ece2d4dea681d22e5d8307e0e0c023|g' ../tensorflow/tensorflow/workspace2.bzl
+sed -i -e 's|pybind11-2.10.4|pybind11-a7b91e33269ab6f3f90167291af2c4179fc878f5|g' ../tensorflow/tensorflow/workspace2.bzl
 
 note_build_stage "Set pyparsing to 2.2.2 for CLIF."
 export PATH="$HOME/.local/bin":$PATH

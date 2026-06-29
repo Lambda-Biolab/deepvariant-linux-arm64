@@ -150,7 +150,12 @@ class MakeExamplesEnd2EndTest(parameterized.TestCase):
   @parameterized.parameters(
       # All tests are run with fast_pass_aligner enabled. There are no
       # golden sets version for ssw realigner.
-      dict(mode='calling', num_shards=0),
+      dict(
+          mode='calling',
+          num_shards=0,
+          pileup_image_height_child=60,
+          pileup_image_height_parent=40,
+      ),
       dict(mode='calling', num_shards=3),
       dict(mode='candidate_sweep', num_shards=0),
       dict(mode='candidate_sweep', num_shards=3),
@@ -169,7 +174,13 @@ class MakeExamplesEnd2EndTest(parameterized.TestCase):
   )
   @flagsaver.flagsaver
   def test_make_examples_end2end(
-      self, mode, num_shards, labeler_algorithm=None, use_fast_pass_aligner=True
+      self,
+      mode,
+      num_shards,
+      labeler_algorithm=None,
+      use_fast_pass_aligner=True,
+      pileup_image_height_child=None,
+      pileup_image_height_parent=None,
   ):
     self.assertIn(mode, {'calling', 'training', 'candidate_sweep'})
     region = ranges.parse_literal('20:10,000,000-10,010,000')
@@ -182,6 +193,10 @@ class MakeExamplesEnd2EndTest(parameterized.TestCase):
     FLAGS.sample_name_to_train = 'child'
     FLAGS.sample_name_parent1 = 'parent1'
     FLAGS.sample_name_parent2 = 'parent2'
+    if pileup_image_height_child is not None:
+      FLAGS.pileup_image_height_child = pileup_image_height_child
+    if pileup_image_height_parent is not None:
+      FLAGS.pileup_image_height_parent = pileup_image_height_parent
     FLAGS.candidates = test_utils.test_tmpfile(
         _sharded('vsc.tfrecord', num_shards)
     )
@@ -1454,7 +1469,7 @@ class RegionProcessorTest(parameterized.TestCase):
   ])
   def test_process_keeps_ordering_of_candidates_and_examples(self, mode):
     self.processor.options.mode = mode
-
+    n_stats = {'n_filtered_low_vaf': 0}
     r1, r2 = mock.Mock(), mock.Mock()
     c1, c2 = mock.Mock(), mock.Mock()
     self.add_mock('region_reads_norealign', retval=[r1, r2])
@@ -1462,7 +1477,7 @@ class RegionProcessorTest(parameterized.TestCase):
         'candidates_in_region', retval=({'child': [c1, c2]}, {}, {}, 2)
     )
     candidates_dict, gvcfs_dict, runtimes, read_phases, phased_reads_count = (
-        self.processor.process(self.region)
+        self.processor.process(self.region, n_stats)
     )
     self.assertEqual({'child': [c1, c2]}, candidates_dict)
     self.assertEqual({}, gvcfs_dict)

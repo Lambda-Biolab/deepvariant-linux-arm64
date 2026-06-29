@@ -624,7 +624,7 @@ class MakeExamplesEnd2EndTest(parameterized.TestCase):
 
   @flagsaver.flagsaver
   def test_make_examples_end2end_confirm_vsc_min_fraction_used(self):
-    """Set very low vsc_max_fraction_{snps,indels} and confirm they're used."""
+    """Set very high vsc_min_fraction_{snps,indels} and confirm they're used."""
     region = ranges.parse_literal('chr20:10,000,000-10,004,000')
     FLAGS.regions = [ranges.to_literal(region)]
     FLAGS.ref = testdata.CHR20_FASTA
@@ -798,21 +798,23 @@ class MakeExamplesEnd2EndTest(parameterized.TestCase):
     FLAGS.reads = testdata.CHR20_PACBIO_BAM
     FLAGS.examples = test_utils.test_tmpfile('examples.tfrecord')
     FLAGS.channel_list = ','.join(
-        dv_constants.PILEUP_DEFAULT_CHANNELS + ['haplotype']
+        dv_constants.PILEUP_DEFAULT_CHANNELS + ['haplotype', 'base_methylation']
     )
     FLAGS.mode = 'calling'
+    FLAGS.split_skip_reads = False
     FLAGS.realign_reads = False
     FLAGS.alt_aligned_pileup = 'diff_channels'
     FLAGS.min_mapping_quality = 1
     FLAGS.parse_sam_aux_fields = True
     FLAGS.partition_size = 25000
     FLAGS.phase_reads = True
-    FLAGS.pileup_image_width = 199
+    FLAGS.pileup_image_width = 147
     FLAGS.sort_by_haplotypes = True
     FLAGS.track_ref_reads = True
     FLAGS.trim_reads_for_pileup = True
     FLAGS.vsc_min_fraction_indels = 0.12
     FLAGS.output_phase_info = True
+    FLAGS.call_small_model_examples = False
     options = make_examples.default_options(add_flags=True)
     # Run make_examples with the flags above.
     make_examples_core.make_examples_runner(options)
@@ -1055,9 +1057,12 @@ class MakeExamplesEnd2EndTest(parameterized.TestCase):
       actual_example = decode_example(actual[i])
       expected_example = decode_example(expected[i])
       self.assertEqual(actual_example.keys(), expected_example.keys())
+      current_locus = actual_example['locus'].decode('utf-8')
       for key in actual_example:
         self.assertEqual(
-            actual_example[key], expected_example[key], 'Failed on %s' % key
+            actual_example[key],
+            expected_example[key],
+            'Failed on %s, for example at locus %s' % (key, current_locus),
         )
 
   def assertVariantIsPresent(self, to_find, variants):
@@ -1399,6 +1404,56 @@ class DefaultOptionsTest(parameterized.TestCase):
     )
     self.assertAlmostEqual(
         options.pic_options.allele_unsupporting_read_alpha, 0.6
+    )
+
+
+class ResolveSamAuxFieldsTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self._saved_flags = flagsaver.save_flag_values()
+    FLAGS.use_original_quality_scores = False
+
+  def tearDown(self):
+    flagsaver.restore_flag_values(self._saved_flags)
+    super().tearDown()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='no_channels',
+          channels=[],
+          expected=[],
+      ),
+      dict(
+          testcase_name='homopolymer_insertion_quality',
+          channels=['homopolymer_insertion_quality'],
+          expected=['tp'],
+      ),
+      dict(
+          testcase_name='homopolymer_deletion_quality',
+          channels=['homopolymer_deletion_quality'],
+          expected=['tp'],
+      ),
+      dict(
+          testcase_name='inter_homopolymer_insertion_quality',
+          channels=['inter_homopolymer_insertion_quality'],
+          expected=['t0'],
+      ),
+      dict(
+          testcase_name='all_quality_channels',
+          channels=[
+              'homopolymer_insertion_quality',
+              'homopolymer_deletion_quality',
+              'inter_homopolymer_insertion_quality',
+          ],
+          expected=['tp', 't0'],
+      ),
+  )
+  def test_resolve_sam_aux_fields(
+      self, channels: list[str], expected: list[str]
+  ) -> None:
+    self.assertCountEqual(
+        expected, make_examples_core.resolve_sam_aux_fields(FLAGS, channels)
     )
 
 

@@ -309,21 +309,17 @@ gcloud compute instances create "${USER}-gpu" \
   --scopes "compute-rw,storage-full,cloud-platform" \
   --maintenance-policy "TERMINATE" \
   --accelerator=type=nvidia-tesla-p100,count=1 \
-  --image-family "ubuntu-2204-lts" \
-  --image-project "ubuntu-os-cloud" \
-  --machine-type "n1-standard-16" \
-  --boot-disk-size "300" \
-  --zone "us-west1-b" \
-  --min-cpu-platform "Intel Skylake"
+  --image-family="ubuntu-2204-lts" \
+  --image-project="ubuntu-os-cloud" \
+  --machine-type="n1-standard-16" \
+  --boot-disk-size="300" \
+  --zone "us-west1-b"
 ```
 
 NOTE: Be sure to manage instances efficiently. Remember to delete the instances
 you're not using. You can find the instances at:
 https://console.cloud.google.com/compute/instances?project=YOUR_PROJECT
 
-[exome case study]: deepvariant-exome-case-study.md
 [whole genome case study]: deepvariant-case-study.md
-[quick start]: deepvariant-quick-start.md
-[Running DeepVariant on Google Cloud Platform]: https://cloud.google.com/life-sciences/docs/tutorials/deepvariant
 [TensorFlow]: http://www.tensorflow.org/
 [Colab example]: visualizing_examples.ipynb

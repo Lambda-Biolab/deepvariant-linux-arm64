@@ -30,6 +30,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(dirname "$0")"
+source "$SCRIPT_DIR/inference_utils.sh"
+source "$SCRIPT_DIR/docker_utils.sh"
 
 USAGE=$'
 Example usage:
@@ -49,12 +52,13 @@ Flags:
 --make_examples_extra_args Flags for make_examples, specified as "flag1=param1,flag2=param2".
 --call_variants_extra_args Flags for call_variants, specified as "flag1=param1,flag2=param2".
 --postprocess_variants_extra_args Flags for postprocess_variants, specified as "flag1=param1,flag2=param2".
---model_preset Preset case study to run: WGS, WES, PACBIO, ONT_R104, WGS_PANGENOME, WES_PANGENOME, ONT_R104_DUPLEX_CHR20, or HYBRID_PACBIO_ILLUMINA. ONT_R104_DUPLEX_CHR20 will use the ONT_R104 model_type.
+--model_preset Preset case study to run: WGS, WES, PACBIO, ONT_R104, WGS_PANGENOME, WES_PANGENOME, or HYBRID_PACBIO_ILLUMINA.
 --par_regions_bed Path to BED containing Human Pseudoautosomal Region (PAR) regions. This is used in postprocess_variants. We separate it out as a flag because we need to copy data from gs://.
 --population_vcfs Path to VCFs containing population allele frequencies. Use wildcard pattern.
 --proposed_variants Path to VCF containing proposed variants. In make_examples_extra_args, you must also specify variant_caller=vcf_candidate_importer but not proposed_variants.
 --save_intermediate_results (true|false) If True, keep intermediate outputs from make_examples and call_variants.
 --skip_happy (true|false) If True, skip the hap.py evaluation.
+--emit_vcf_by_small_model_gq_values (comma-separated list of integers) If set, emits a separate VCF for each provided small model GQ threshold.
 --report_title Optional title for reports (VCF stats report and make_examples runtime report).
 
 --main_binary_name (run_deepvariant|run_pangenome_aware_deepvariant)  Default is run_deepvariant. If using the pangenome-aware DeepVariant Docker image, use run_pangenome_aware_deepvariant.
@@ -63,7 +67,7 @@ Flags:
 If model_preset is not specified, the below flags are required:
 --model_type Type of DeepVariant model to run (WGS, WES, PACBIO, ONT_R104, HYBRID_PACBIO_ILLUMINA)
 --ref Path to GCP bucket containing ref file (.fa)
---bam Path to GCP bucket containing BAM
+--bam Path to GCP bucket containing BAM (can be a comma-separated list for multiple BAMs)
 --truth_vcf Path to GCP bucket containing truth VCF
 --truth_bed Path to GCP bucket containing truth BED
 --capture_bed Path to GCP bucket containing captured file (only needed for WES model_type)
@@ -86,8 +90,10 @@ BIN_VERSION="latest"
 CALL_VARIANTS_ARGS=""
 CAPTURE_BED=""
 CUSTOMIZED_MODEL=""
+CUSTOMIZED_MODEL_JSON=""
 CUSTOMIZED_SMALL_MODEL=""
 DOCKER_SOURCE="google/deepvariant"
+EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES=""
 MAIN_BINARY_NAME="run_deepvariant"
 MAKE_EXAMPLES_ARGS=""
 MODEL_PRESET=""
@@ -168,6 +174,11 @@ while (( "$#" )); do
       ;;
     --customized_model)
       CUSTOMIZED_MODEL="$2"
+      shift # Remove argument name from processing
+      shift # Remove argument value from processing
+      ;;
+    --customized_model_json)
+      CUSTOMIZED_MODEL_JSON="$2"
       shift # Remove argument name from processing
       shift # Remove argument value from processing
       ;;
@@ -276,6 +287,11 @@ while (( "$#" )); do
       shift # Remove argument name from processing
       shift # Remove argument value from processing
       ;;
+    --emit_vcf_by_small_model_gq_values)
+      EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES="$2"
+      shift # Remove argument name from processing
+      shift # Remove argument value from processing
+      ;;
     --num_shards)
       NUM_SHARDS="$2"
       shift # Remove argument name from processing
@@ -315,23 +331,37 @@ if [[ "${MODEL_PRESET}" = "PACBIO" ]]; then
   BAM="${BAM:=${GCS_DATA_DIR}/pacbio-case-study-testdata/HG003.SPRQ.pacbio.GRCh38.nov2024.bam}"
   TRUTH_VCF="${TRUTH_VCF:=${GCS_DATA_DIR}/case-study-testdata/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz}"
   TRUTH_BED="${TRUTH_BED:=${GCS_DATA_DIR}/case-study-testdata/HG003_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed}"
+elif [[ "${MODEL_PRESET}" = "PACBIO_T2T" ]]; then
+  MODEL_TYPE="PACBIO"
+  BASE="${HOME}/pacbio-case-study"
+
+  REF="${REF:=${GCS_DATA_DIR}/case-study-testdata/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna}"
+  # TODO: If we want to externalize this, we need to use a public BAM.
+  BAM="${BAM:=gs://brain-genomics/awcarroll/pacbio_training_2024/kudu/aligned.sorted.hg002.m84034_240730_194815_s1.hifi_reads.ccs.bam}"
+  TRUTH_VCF="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.20250117.vcf.gz"
+  TRUTH_BED="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.benchmark.bed"
 elif [[ "${MODEL_PRESET}" = "ONT_R104" ]]; then
   MODEL_TYPE="ONT_R104"
   BASE="${HOME}/ont-case-study"
 
   REF="${REF:=${GCS_DATA_DIR}/case-study-testdata/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna}"
-  BAM="${BAM:=${GCS_DATA_DIR}/ont-case-study-testdata/HG003_R104_sup_merged.80x.bam}"
+  BAM="${BAM:=${GCS_DATA_DIR}/ont-case-study-testdata/HG003_PAY87794.calls.sorted.bam}"
   TRUTH_VCF="${TRUTH_VCF:=${GCS_DATA_DIR}/case-study-testdata/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz}"
   TRUTH_BED="${TRUTH_BED:=${GCS_DATA_DIR}/case-study-testdata/HG003_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed}"
-elif [[ "${MODEL_PRESET}" = "ONT_R104_DUPLEX_CHR20" ]]; then
+elif [[ "${MODEL_PRESET}" = "ONT_R104_T2T" ]]; then
   MODEL_TYPE="ONT_R104"
-  BASE="${HOME}/ont-duplex-case-study"
+  BASE="${HOME}/ont-case-study"
 
   REF="${REF:=${GCS_DATA_DIR}/case-study-testdata/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna}"
-  BAM="${BAM:=${GCS_DATA_DIR}/ont-case-study-testdata/HG002_R1041_Duplex_all_Dorado_v0.1.1_400bps_pass_2_GRCh38.chr20.bam}"
-  TRUTH_VCF="${TRUTH_VCF:=${GCS_DATA_DIR}/case-study-testdata/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz}"
-  TRUTH_BED="${TRUTH_BED:=${GCS_DATA_DIR}/case-study-testdata/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed}"
-  REGIONS="chr20"
+  if [[ -z "${BAM:-}" ]]; then
+    if [[ "${REGIONS:-}" == "chr20" ]]; then
+      BAM="gs://deepvariant/ont-case-study-testdata/HG002_R104_sup_merged.50x.chr20.bam"
+    else
+      BAM="gs://deepvariant/ont-case-study-testdata/HG002_R104_sup_merged.50x.bam"
+    fi
+  fi
+  TRUTH_VCF="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.20250117.vcf.gz"
+  TRUTH_BED="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.benchmark.bed"
 elif [[ "${MODEL_PRESET}" = "WGS" ]]; then
   MODEL_TYPE="WGS"
   BASE="${HOME}/wgs-case-study"
@@ -345,6 +375,19 @@ elif [[ "${MODEL_PRESET}" = "WGS" ]]; then
   else
     BAM="${BAM:=${GCS_DATA_DIR}/case-study-testdata/HG003.novaseq.pcr-free.35x.dedup.grch38_no_alt.bam}"
   fi
+elif [[ "${MODEL_PRESET}" = "WGS_T2T" ]]; then
+  MODEL_TYPE="WGS"
+  BASE="${HOME}/wgs-case-study"
+
+  REF="${REF:=${GCS_DATA_DIR}/case-study-testdata/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna}"
+  TRUTH_VCF="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.20250117.vcf.gz"
+  TRUTH_BED="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.benchmark.bed"
+  if [[ "${MAIN_BINARY_NAME}" = "run_pangenome_aware_deepvariant" ]]; then
+    echo "Use VG BAM for pangenome-aware DeepVariant."
+    BAM="${BAM:=gs://deepvariant/vg-case-study/HG002.novaseq.pcr-free.35x.vg-1.55.0.bam}"
+  else
+    BAM="${BAM:=${GCS_DATA_DIR}/case-study-testdata/HG002.novaseq.pcr-free.35x.dedup.grch38_no_alt.bam}"
+  fi
 elif [[ "${MODEL_PRESET}" = "WES" ]]; then
   MODEL_TYPE="WES"
   BASE="${HOME}/wes-case-study"
@@ -353,6 +396,15 @@ elif [[ "${MODEL_PRESET}" = "WES" ]]; then
   BAM="${BAM:=${GCS_DATA_DIR}/exome-case-study-testdata/HG003.novaseq.wes_idt.100x.dedup.bam}"
   TRUTH_VCF="${TRUTH_VCF:=${GCS_DATA_DIR}/case-study-testdata/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz}"
   TRUTH_BED="${TRUTH_BED:=${GCS_DATA_DIR}/case-study-testdata/HG003_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed}"
+  CAPTURE_BED="${CAPTURE_BED:=${GCS_DATA_DIR}/exome-case-study-testdata/idt_capture_novogene.grch38.bed}"
+elif [[ "${MODEL_PRESET}" = "WES_T2T" ]]; then
+  MODEL_TYPE="WES"
+  BASE="${HOME}/wes-case-study"
+
+  REF="${REF:=${GCS_DATA_DIR}/case-study-testdata/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna}"
+  BAM="${BAM:=${GCS_DATA_DIR}/exome-case-study-testdata/HG002.novaseq.wes_idt.100x.dedup.bam}"
+  TRUTH_VCF="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.20250117.vcf.gz"
+  TRUTH_BED="gs://deepvariant/case-study-testdata/GRCh38_HG2-T2TQ100-V1.1_smvar.benchmark.bed"
   CAPTURE_BED="${CAPTURE_BED:=${GCS_DATA_DIR}/exome-case-study-testdata/idt_capture_novogene.grch38.bed}"
 elif [[ "${MODEL_PRESET}" = "HYBRID_PACBIO_ILLUMINA" ]]; then
   MODEL_TYPE="HYBRID_PACBIO_ILLUMINA"
@@ -381,7 +433,7 @@ elif [[ "${MODEL_PRESET}" = "WES_PANGENOME" ]]; then
   CAPTURE_BED="${CAPTURE_BED:=${GCS_DATA_DIR}/exome-case-study-testdata/idt_capture_novogene.grch38.bed}"
 else
   if [[ -n "${MODEL_PRESET}" ]]; then
-    echo "Error: --model_preset must be one of WGS, WES, PACBIO, HYBRID_PACBIO_ILLUMINA." >&2
+    echo "Error: unrecognized --model_preset ${MODEL_PRESET}." >&2
     exit 1
   fi
 
@@ -426,6 +478,7 @@ echo "BIN_VERSION: ${BIN_VERSION}"
 echo "CALL_VARIANTS_ARGS: ${CALL_VARIANTS_ARGS}"
 echo "CAPTURE_BED: ${CAPTURE_BED}"
 echo "CUSTOMIZED_MODEL: ${CUSTOMIZED_MODEL}"
+echo "CUSTOMIZED_MODEL_JSON: ${CUSTOMIZED_MODEL_JSON}"
 echo "CUSTOMIZED_SMALL_MODEL: ${CUSTOMIZED_SMALL_MODEL}"
 echo "MAIN_BINARY_NAME: ${MAIN_BINARY_NAME}"
 echo "MAKE_EXAMPLES_ARGS: ${MAKE_EXAMPLES_ARGS}"
@@ -439,57 +492,91 @@ echo "PROPOSED_VARIANTS: ${PROPOSED_VARIANTS}"
 echo "REF: ${REF}"
 echo "REGIONS: ${REGIONS}"
 echo "REPORT_TITLE: ${REPORT_TITLE}"
+echo "EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES: ${EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES}"
 echo "TRUTH_BED: ${TRUTH_BED}"
 echo "TRUTH_VCF: ${TRUTH_VCF}"
 echo "========================="
 
-function run() {
-  if [[ "${DRY_RUN}" == "true" ]]; then
-    # Prints out command to stdout and a [DRY RUN] tag to stderr.
-    # This allows the users to use the dry_run mode to get a list of
-    # executable commands by redirecting stdout to a file.
-    1>&2 printf "[DRY RUN] " && echo "$*"
-  else
-    echo "$*"
-    eval "$@"
-  fi
-}
 
 function copy_gs_or_http_file() {
-  if [[ "$1" == http* ]]; then
-    if curl --output /dev/null --silent --head --fail "$1"; then
-      run echo "Copying from \"$1\" to \"$2\""
-      run aria2c -c -x10 -s10 "$1" -d "$2"
-    else
-      run echo "File $1 does not exist. Skip copying."
-    fi
-  elif [[ "$1" == gs://* ]]; then
-    status=0
-    gsutil -q stat "$1" || status=1
-    if [[ $status == 0 ]]; then
-      run echo "Copying from \"$1\" to \"$2\""
-      run gcloud storage cp "$1" "$2"
-    else
-      run echo "File $1 does not exist. Skip copying."
-    fi
-  else
-    echo "Unrecognized file format: $1" >&2
-    exit 1
+  local file_item
+  # Set Internal Field Separator (IFS) to comma to split the string
+  # -r: do not allow backslashes to escape any characters
+  # -a files_to_copy: read into an array named 'files_to_copy'
+  IFS=',' read -r -a files_to_copy <<< "$1"
+
+  # Check if any files were actually parsed
+  if [[ ${#files_to_copy[@]} -eq 0 ]] && [[ -n "$1" ]]; then
+      echo "Warning: No valid file names parsed from the input string '$1'."
+      echo "         This might happen if the string only contains commas or is malformed."
+      exit 1
+  elif [[ ${#files_to_copy[@]} -eq 0 ]]; then
+      echo "No files specified in the input string."
+      exit 1
   fi
+
+  for file_item in "${files_to_copy[@]}"; do
+    local trimmed_file
+    trimmed_file=$(echo "$file_item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    if [[ "$trimmed_file" == http* ]]; then
+      if curl --output /dev/null --silent --head --fail "$trimmed_file"; then
+        run echo "Copying from \"$trimmed_file\" to \"$2\""
+        run aria2c -c -x10 -s10 "$trimmed_file" -d "$2"
+      else
+        run echo "File $trimmed_file does not exist. Skip copying."
+      fi
+    elif [[ "$trimmed_file" == gs://* ]]; then
+      status=0
+      run --skip-dry-run-print gsutil -q stat "$trimmed_file" || status=1
+      if [[ $status == 0 ]]; then
+        run echo "Copying from \"$trimmed_file\" to \"$2\""
+        # Skip the file if it exists.
+        run gcloud storage cp -n "$trimmed_file" "$2"
+      else
+        run echo "File $trimmed_file does not exist. Skip copying."
+      fi
+    else
+      echo "Unrecognized file format: $trimmed_file" >&2
+      exit 1
+    fi
+  done
 }
 
 function copy_correct_index_file() {
-  BAM="$1"
-  INPUT_DIR="$2"
+  # We need to parse the BAM file name to get the correct index file name. And
+  # copy the index file one by one to the input directory using
+  # copy_gs_or_http_file. copy_gs_or_http_file supports copying a list of files
+  # or a single file.
+  local BAM="$1"
+  local INPUT_DIR="$2"
+  local bam_file_item
+
+  # Set Internal Field Separator (IFS) to comma to split the string
+  # -r: do not allow backslashes to escape any characters
+  # -a files_to_copy: read into an array named 'files_to_copy'
+  IFS=',' read -r -a files_to_copy <<< "$BAM"
+
+  # Check if any files were actually parsed
+  if [[ ${#files_to_copy[@]} -eq 0 ]] && [[ -n "$1" ]]; then
+      echo "Warning: No valid file names parsed from the input string '$1'."
+      echo "         This might happen if the string only contains commas or is malformed."
+      exit 1
+  elif [[ ${#files_to_copy[@]} -eq 0 ]]; then
+      echo "No files specified in the input string."
+      exit 1
+  fi
+
   # Index files have two acceptable naming patterns. We explicitly check for
   # both since we cannot use wildcard paths with http files.
-  if [[ "${BAM}" == *".cram" ]]; then
-    copy_gs_or_http_file "${BAM%.cram}.crai" "${INPUT_DIR}"
-    copy_gs_or_http_file "${BAM}.crai" "${INPUT_DIR}"
-  else
-    copy_gs_or_http_file "${BAM%.bam}.bai" "${INPUT_DIR}"
-    copy_gs_or_http_file "${BAM}.bai" "${INPUT_DIR}"
-  fi
+  for bam_file_item in "${files_to_copy[@]}"; do
+    if [[ "${bam_file_item}" == *".cram" ]]; then
+      copy_gs_or_http_file "${bam_file_item%.cram}.crai" "${INPUT_DIR}"
+      copy_gs_or_http_file "${bam_file_item}.crai" "${INPUT_DIR}"
+    else
+      copy_gs_or_http_file "${bam_file_item%.bam}.bai" "${INPUT_DIR}"
+      copy_gs_or_http_file "${bam_file_item}.bai" "${INPUT_DIR}"
+    fi
+  done
 }
 
 function copy_data() {
@@ -590,7 +677,6 @@ function get_docker_image() {
         --build-arg=FROM_IMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 \
         --build-arg=DV_GPU_BUILD=1 -t deepvariant_gpu ."
       run echo "Done building GPU Docker image ${IMAGE}."
-      docker_args+=( --gpus 1 )
     else
       IMAGE="deepvariant:latest"
       # Building twice in case the first one times out.
@@ -598,32 +684,23 @@ function get_docker_image() {
         (sleep 5 ; sudo docker build -f ${DOCKERFILE_NAME} -t deepvariant .)"
       run echo "Done building Docker image ${IMAGE}."
     fi
-
   else
-    if [[ "${USE_GPU}" = true ]]; then
-      IMAGE="${DOCKER_SOURCE}:${BIN_VERSION}-gpu"
-      # shellcheck disable=SC2027
-      # shellcheck disable=SC2086
-      run "sudo docker pull "${IMAGE}" || \
-        (sleep 5 ; sudo docker pull "${IMAGE}")"
-      docker_args+=( --gpus 1 )
-    else
-      IMAGE="${DOCKER_SOURCE}:${BIN_VERSION}"
-      # shellcheck disable=SC2027
-      # shellcheck disable=SC2086
-      run "sudo docker pull "${IMAGE}" || \
-        (sleep 5 ; sudo docker pull "${IMAGE}")"
-    fi
-  fi
-  if [[ "${USE_GPU}" = true ]]; then
+    IMAGE=$(get_deepvariant_docker_image_name "${DOCKER_SOURCE}" "${BIN_VERSION}" "${USE_GPU}")
     # shellcheck disable=SC2027
     # shellcheck disable=SC2086
-    run "sudo docker run --gpus 1 "${IMAGE}" \
+    run "sudo docker pull "${IMAGE}" || \
+        (sleep 5 ; sudo docker pull "${IMAGE}")"
+  fi
+  if [[ "${USE_GPU}" = true ]]; then
+    docker_args+=( --gpus all )
+    # shellcheck disable=SC2027
+    # shellcheck disable=SC2086
+    run "sudo docker run --gpus all "${IMAGE}" \
       python3 -c 'import tensorflow as tf; \
       print(\"is_gpu_available=\" + str(tf.test.is_gpu_available()))'"
     # shellcheck disable=SC2027
     # shellcheck disable=SC2086
-    run "sudo docker run --gpus 1 "${IMAGE}" \
+    run "sudo docker run --gpus all "${IMAGE}" \
       python3 -c 'import tensorflow as tf; \
       tf.test.is_gpu_available() or exit(1)' \
       2> /dev/null || exit 1"
@@ -638,6 +715,29 @@ function get_docker_image() {
   if [[ ! -z "${SHM_SIZE}" ]]; then
     docker_args+=( --shm-size "${SHM_SIZE}gb")
   fi
+}
+
+# Process input as a comma-separated list of files.
+# First extract base names from the list. Then add them to the coma-separated
+# line containing basenames prepended with "/input/".
+function process_file_list() {
+  FILE_LIST="$1"
+  processed_reads_list=()
+  if [[ -n "$1" ]]; then
+      _OLD_IFS="$IFS"; IFS=','; read -r -a bam_array <<< "$FILE_LIST"; IFS="$_OLD_IFS"
+      for item in "${bam_array[@]}"; do
+          trimmed_item=$(echo "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [[ -z "$trimmed_item" ]]; then continue; fi
+          base_name=$(basename -- "$trimmed_item")
+          processed_reads_list+=( "/input/$base_name" )
+      done
+  fi
+
+  basename_list=""
+  if [[ ${#processed_reads_list[@]} -gt 0 ]]; then
+      _OLD_IFS="$IFS"; IFS=','; basename_list="${processed_reads_list[*]}"; IFS="$_OLD_IFS"
+  fi
+  echo "$basename_list"
 }
 
 function setup_args() {
@@ -655,14 +755,22 @@ function setup_args() {
       echo "Using saved model"
       run mkdir -p "${INPUT_DIR}/savedmodel"
       run gcloud storage cp -R "${CUSTOMIZED_MODEL}"/'*' "${INPUT_DIR}"/savedmodel/
-      run gcloud storage cp "${CUSTOMIZED_MODEL}"/example_info.json "${INPUT_DIR}"/savedmodel/example_info.json
+      if [[ -n "${CUSTOMIZED_MODEL_JSON}" ]]; then
+        run gcloud storage cp "${CUSTOMIZED_MODEL_JSON}" "${INPUT_DIR}/savedmodel/model.example_info.json"
+      else
+        run gcloud storage cp "${CUSTOMIZED_MODEL}"/model.example_info.json "${INPUT_DIR}"/savedmodel/model.example_info.json
+      fi
       extra_args+=( --customized_model "/input/savedmodel")
     else
       echo "Using checkpoint"
       run gcloud storage cp "${CUSTOMIZED_MODEL}".data-00000-of-00001 "${INPUT_DIR}/model.ckpt.data-00000-of-00001"
       run gcloud storage cp "${CUSTOMIZED_MODEL}".index "${INPUT_DIR}/model.ckpt.index"
       CUSTOMIZED_MODEL_DIR="$(dirname "${CUSTOMIZED_MODEL}")"
-      run "gcloud storage cp ${CUSTOMIZED_MODEL_DIR}/example_info.json ${INPUT_DIR}/example_info.json"
+      if [[ -n "${CUSTOMIZED_MODEL_JSON}" ]]; then
+        run gcloud storage cp "${CUSTOMIZED_MODEL_JSON}" "${INPUT_DIR}/model.example_info.json"
+      else
+        run gcloud storage cp "${CUSTOMIZED_MODEL_DIR}"/model.example_info.json "${INPUT_DIR}/model.example_info.json"
+      fi
       extra_args+=( --customized_model "/input/model.ckpt")
     fi
   else
@@ -672,8 +780,8 @@ function setup_args() {
     echo "Using customized small model"
     run mkdir -p "${INPUT_DIR}/smallmodel"
     run echo "Copy from gs:// path ${CUSTOMIZED_SMALL_MODEL} to ${INPUT_DIR}/smallmodel"
-    run gcloud storage cp -R "${CUSTOMIZED_SMALL_MODEL}"/'*' "${INPUT_DIR}"/smallmodel/
-    extra_args+=( --customized_small_model "/input/smallmodel")
+    run gcloud storage cp -R "${CUSTOMIZED_SMALL_MODEL}"/'*.keras' "${INPUT_DIR}"/smallmodel/model.keras
+    extra_args+=( --customized_small_model "/input/smallmodel/model.keras")
   fi
   if [[ -n "${POPULATION_VCFS}" ]]; then
     MAKE_EXAMPLES_ARGS="${MAKE_EXAMPLES_ARGS:+${MAKE_EXAMPLES_ARGS},}population_vcfs=/input/$(basename "$POPULATION_VCFS")"
@@ -714,8 +822,8 @@ function setup_args() {
   fi
   if [[ -n "${REGIONS}" ]]; then
     if [[ "${REGIONS}" = http* ]] || [[ "${REGIONS}" = gs://* ]]; then
-      extra_args+=( --regions "/input/$(basename $REGIONS)")
-      happy_args+=( -T "${INPUT_DIR}/$(basename $REGIONS)")
+      extra_args+=( --regions "/input/$(basename "$REGIONS")")
+      happy_args+=( -T "${INPUT_DIR}/$(basename "$REGIONS")")
     else
       extra_args+=( --regions "${REGIONS}")
       happy_args+=( -l "${REGIONS}")
@@ -729,6 +837,10 @@ function setup_args() {
       echo "Enabling small model"
       extra_args+=( --nodisable_small_model )
     fi
+  fi
+  if [[ -n "${EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES}" ]]; then
+      echo "Running small model debug GQ over ${EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES}"
+      extra_args+=( --emit_vcf_by_small_model_gq_values "${EMIT_VCF_BY_SMALL_MODEL_GQ_VALUES}")
   fi
   # If you're running an older version (before 1.2) that doesn't have this flag,
   # you'll need to comment out this line.
@@ -750,14 +862,14 @@ function run_deepvariant_with_docker() {
   # shellcheck disable=SC2086
   # shellcheck disable=SC2145
   run "(time (sudo docker run \
+    ${docker_args[@]-} \
     -v "${INPUT_DIR}":"/input" \
     -v "${OUTPUT_DIR}:/output" \
-    ${docker_args[@]-} \
     "${IMAGE}" \
     /opt/deepvariant/bin/${MAIN_BINARY_NAME} \
     --model_type="${MODEL_TYPE}" \
     --ref="/input/$(basename $REF).gz" \
-    --reads="/input/$(basename $BAM)" \
+    --reads="$(process_file_list $BAM)" \
     --output_vcf="/output/${OUTPUT_VCF}" \
     --output_gvcf="/output/${OUTPUT_GVCF}" \
     --num_shards "${NUM_SHARDS}" \

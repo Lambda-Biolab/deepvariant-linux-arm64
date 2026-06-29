@@ -29,6 +29,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "deepvariant/protos/deepvariant.pb.h"
 #include "pybind11/cast.h"
 #if true  // Trick to stop tooling from moving the #include around.
 // MUST appear before any standard headers are included.
@@ -52,10 +53,11 @@ PYBIND11_MODULE(direct_phasing, m) {
   py::class_<PhasedVariant>(m, "PhasedVariant")
       .def_readwrite("position", &PhasedVariant::position)
       .def_readwrite("phase_1_bases", &PhasedVariant::phase_1_bases)
-      .def_readwrite("phase_2_bases", &PhasedVariant::phase_2_bases);
+      .def_readwrite("phase_2_bases", &PhasedVariant::phase_2_bases)
+      .def_readwrite("is_first_in_block", &PhasedVariant::is_first_in_block);
 
   py::classh<DirectPhasing>(m, "DirectPhasing")
-      .def(py::init<>())
+      .def(py::init<const DirectPhasingOptions&>(), py::arg("options"))
       .def("graphviz", &DirectPhasing::GraphViz)
       .def("get_phased_variants", &DirectPhasing::GetPhasedVariants)
       .def("phase", &DirectPhasing::PhaseReadsPython, py::arg("candidates"),

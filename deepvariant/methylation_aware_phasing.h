@@ -36,26 +36,18 @@
 #include <vector>
 
 #include "deepvariant/protos/deepvariant.pb.h"
+#include "absl/types/span.h"
 #include "third_party/nucleus/protos/reads.pb.h"
 
 namespace learning {
 namespace genomics {
 namespace deepvariant {
 
-// Returns true if methylation values between the two haplotypes are
-// significantly different (p < 0.05).
-// Returns false if p >= threshold or inputs are invalid (e.g. one haplotype
-// has no methylation data).
-bool IsDifferentiallyMethylated(
-    const std::vector<double>& hap1_methyl,
-    const std::vector<double>& hap2_methyl);
-
 // Performs the Wilcoxon Rank-Sum Test (Mann-Whitney U Test) between two
 // haplotypes’ methylation values. Returns the two-sided p-value.
 // Returns -1.0 if either haplotype has no data.
-double WilcoxonRankSumTest(
-    const std::vector<double>& hap1_methyl,
-    const std::vector<double>& hap2_methyl);
+double WilcoxonRankSumTest(absl::Span<const double> hap1_methyl,
+                           absl::Span<const double> hap2_methyl);
 
 // Votes on the haplotype assignment for an unphased read using methylation
 // similarity.
@@ -69,10 +61,10 @@ double WilcoxonRankSumTest(
 //   2 = Haplotype 2
 //   0 = Cannot assign
 int HaplotypeVoteWithMethylation(
-  const DeepVariantCall_ReadSupport& unphased_read,
-  const std::vector<DeepVariantCall>& informative_calls,
-  const std::vector<const DeepVariantCall_ReadSupport*>& hap1_reads,
-  const std::vector<const DeepVariantCall_ReadSupport*>& hap2_reads);
+    const DeepVariantCall_ReadSupport& unphased_read,
+    absl::Span<const DeepVariantCall> informative_calls,
+    const std::vector<const DeepVariantCall_ReadSupport*>& hap1_reads,
+    const std::vector<const DeepVariantCall_ReadSupport*>& hap2_reads);
 
 // Returns methylation level as a float between 0 and 1, or -1 if no
 // methylation level is present (methylation_level == 0).
@@ -80,10 +72,10 @@ double GetMethylationLevelAtSite(const DeepVariantCall_ReadSupport& read);
 
 // Identifies methylated reference sites that show differential methylation
 // between haplotype 1 and haplotype 2 read sets.
-std::vector<DeepVariantCall> IdentifyInformativeSites(
-    const std::vector<DeepVariantCall>& methylated_calls,
+std::vector<DeepVariantCall> IdentifyInformativeSitesAndUpdatePValues(
     const std::vector<const DeepVariantCall_ReadSupport*>& hap1_reads,
-    const std::vector<const DeepVariantCall_ReadSupport*>& hap2_reads);
+    const std::vector<const DeepVariantCall_ReadSupport*>& hap2_reads,
+    std::vector<DeepVariantCall>& methylated_calls);
 
 // Returns a unique key identifying a read based on its fragment name and
 // read number.
@@ -92,9 +84,8 @@ std::string ReadKeyForMethylationAwarePhasing(
 
 // Extracts reads assigned to a specific haplotype phase (0, 1, or 2).
 std::vector<const DeepVariantCall_ReadSupport*> ExtractReadsByPhase(
-    const std::vector<DeepVariantCall_ReadSupport>& reads,
-    const std::vector<int>& phases, int target_phase);
-
+    absl::Span<const DeepVariantCall_ReadSupport> reads,
+    absl::Span<const int> phases, int target_phase);
 
 // Performs iterative methylation-aware phasing on a set of reads.
 //
@@ -104,12 +95,11 @@ std::vector<const DeepVariantCall_ReadSupport*> ExtractReadsByPhase(
 // identifies differentially methylated sites, and votes for each unphased
 // read's haplotype assignment by comparing its methylation levels to those
 // signatures.
-std::vector<int> PerformMethylationAwarePhasing(
-  const std::vector<nucleus::genomics::v1::Read>&
-    reads_to_phase,
-  const std::vector<int>& initial_read_phases,
-  const std::vector<DeepVariantCall>& methylated_ref_sites,
-  int max_iter);
+std::tuple<std::vector<int>, std::vector<double>>
+PerformMethylationAwarePhasing(
+    absl::Span<const nucleus::genomics::v1::Read> reads_to_phase,
+    const std::vector<int>& initial_read_phases,
+    std::vector<DeepVariantCall>& methylated_ref_sites, int max_iter);
 
 }  // namespace deepvariant
 }  // namespace genomics

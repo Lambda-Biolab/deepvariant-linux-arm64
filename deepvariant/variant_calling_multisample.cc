@@ -77,6 +77,11 @@ const char* const kVAFFormatField = "VAF";
 const char* const kMFFormatField = "MF";
 const char* const kMDFormatField = "MD";
 
+// Paired Normal Sample fields
+const char* const kDPNormalFormatField = "NDP";
+const char* const kADNormalFormatField = "NAD";
+const char* const kVAFNormalFormatField = "NAF";
+
 // The VCF/Variant allele string to use when you don't have any alt alleles.
 const char* const kNoAltAllele = ".";
 
@@ -112,17 +117,28 @@ int DeletionSize(const Allele& allele) {
 // use those bases as our reference.  And if there are multiple deletions
 // at a site, we need to use the longest deletion allele.
 std::string CalcRefBases(absl::string_view ref_bases,
-                         absl::Span<const Allele> alt_alleles) {
+                         absl::Span<const Allele> alt_alleles,
+                         absl::Span<const Allele> rejected_alleles) {
   if (alt_alleles.empty()) {
     // We don't have any alternate alleles, so used the provided ref_bases.
     return std::string(ref_bases);
   }
 
-  const auto max_elt =
+  const auto max_elt_main =
       std::max_element(alt_alleles.cbegin(), alt_alleles.cend(),
                        [](const Allele& allele1, const Allele& allele2) {
                          return DeletionSize(allele1) < DeletionSize(allele2);
                        });
+  const auto max_elt_rejected =
+      std::max_element(rejected_alleles.cbegin(), rejected_alleles.cend(),
+                    [](const Allele& allele1, const Allele& allele2) {
+                      return DeletionSize(allele1) < DeletionSize(allele2);
+                    });
+  // rejected_alleles may be empty, so we need to check for that.
+  auto max_elt = (max_elt_rejected == rejected_alleles.cend()
+            || DeletionSize(*max_elt_main) > DeletionSize(*max_elt_rejected)) ?
+      max_elt_main : max_elt_rejected;
+
   if (max_elt->type() != AlleleType::DELETION) {
     return std::string(ref_bases);
   } else {
@@ -135,6 +151,45 @@ std::string CalcRefBases(absl::string_view ref_bases,
         << max_elt->ShortDebugString();
     return absl::StrCat(ref_bases, max_elt->bases().substr(1));
   }
+}
+
+bool CanKeepRejectedDeletion(absl::string_view ref_bases,
+                             absl::Span<const Allele> alt_alleles,
+                             absl::Span<const Allele> rejected_alleles) {
+  if (alt_alleles.empty()) {
+  // We don't have any alternate alleles, so used the provided ref_bases.
+    return false;
+  }
+
+  const auto max_elt_main =
+    std::max_element(alt_alleles.cbegin(), alt_alleles.cend(),
+      [](const Allele& allele1, const Allele& allele2) {
+        return DeletionSize(allele1) < DeletionSize(allele2);
+      });
+
+  const auto max_elt_rejected =
+    std::max_element(rejected_alleles.cbegin(), rejected_alleles.cend(),
+      [](const Allele& allele1, const Allele& allele2) {
+      return DeletionSize(allele1) < DeletionSize(allele2);
+      });
+
+  // We should allow rejected deletions only if the main alleles have deletion
+  // and the length of rejected deletion is within 3 bp of the main deletion.
+  // This is because in some extreme cases the rejected deletion may be very
+  // large and cause the haplotype labeler to run very slow.
+  if (max_elt_rejected != rejected_alleles.cend()
+      && max_elt_main->type() == AlleleType::DELETION
+      && max_elt_rejected->type() == AlleleType::DELETION) {
+    if (DeletionSize(*max_elt_rejected) - DeletionSize(*max_elt_main) > 3) {
+      return false;
+    }
+  } else if (max_elt_rejected != rejected_alleles.cend()
+             && max_elt_main->type() != AlleleType::DELETION
+             && max_elt_rejected->type() == AlleleType::DELETION) {
+    return false;
+  }
+
+  return true;
 }
 
 // Constructs an alt allele from the prefix bases and the reference bases.
@@ -455,6 +510,7 @@ SelectAltAllelesResult
   VariantCaller::SelectAltAllelesWithComplexVariant(
         const SelectAltAllelesWithComplexVariantInputOptions& options) const {
   SelectAltAllelesResult output_options;
+  output_options.rejected_alleles = std::move(options.rejected_alleles);
   // Scan alt_alleles for deletion and create complex variant candidate if there
   // are other alleles overlapped with this deletion.
   std::vector<Allele>::const_iterator allele_with_del = std::find_if(
@@ -479,7 +535,9 @@ SelectAltAllelesResult
   // Since there may be multiple deletions of different lengths we need to
   // set del_len to the largest one. This is done in CalcRefBases().
   output_options.ref_bases =
-      CalcRefBases(target_sample_allele_count.ref_base(), options.alt_alleles);
+      CalcRefBases(target_sample_allele_count.ref_base(),
+                   options.alt_alleles,
+                   options.rejected_alleles);
   // If there are multiple deletions we take the largest one.
   int del_len = output_options.ref_bases.size();
   int del_start = target_sample_allele_count.position().position();
@@ -530,7 +588,7 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
     const SelectAltAllelesInputOptions& options) const {
   SelectAltAllelesResult output_options;
   // allele_counts_mod is initialized to be the same as allele_counts. If
-  // complex variants are eneabled then allele_counts_mod will be modified.
+  // complex variants are enabled then allele_counts_mod will be modified.
   for (const auto& [sample_name, allele_count] :
            options.allele_counts_by_sample) {
       output_options.allele_counts_mod.insert({sample_name, allele_count});
@@ -544,9 +602,9 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
   std::vector<AlleleCount> all_samples_allele_counts;
   all_samples_allele_counts.reserve(options.allele_counts_by_sample.size());
   // "Non-target" samples are referring to all the samples that are providing
-  // supportive information. Usually the main truth labels are not from this
-  // sample, or usually it means that the calls coming from these non-target
-  // samples are not the main focus of our problem.
+  // supportive information. For example, in DeepTrio, they correspond to the
+  // parent samples. In DeepSomatic tumor-normal calling, it would refer to the
+  // normal sample.
   std::vector<AlleleCount> non_target_allele_counts;
   non_target_allele_counts.reserve(options.allele_counts_by_sample.size());
   for (const auto& allele_counts_entry : options.allele_counts_by_sample) {
@@ -568,7 +626,8 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
   const int all_samples_total_count =
       TotalAlleleCounts(all_samples_allele_counts);
 
-  std::vector<Allele> alt_alleles;
+  std::vector<Allele> target_sample_alt_alleles;
+  std::vector<Allele> rejected_alleles;
   for (const auto& allele : target_sample_alleles) {
     if (AlleleFilter(
             allele,
@@ -576,7 +635,12 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
             target_samples_total_count,
             all_samples_total_count,
             all_sample_alleles)) {
-      alt_alleles.push_back(allele);
+      target_sample_alt_alleles.push_back(allele);
+    } else {
+      // Allele did not pass the filter. Store it as a rejected allele.
+      if (options.use_rejected_alleles) {
+        rejected_alleles.push_back(allele);
+      }
     }
   }  // for (alleles in target samples)
 
@@ -586,13 +650,17 @@ SelectAltAllelesResult VariantCaller::SelectAltAlleles(
     return SelectAltAllelesWithComplexVariant(
         {
           .allele_counts_by_sample = options.allele_counts_by_sample,
-          .alt_alleles = std::move(alt_alleles)
+          .alt_alleles = std::move(target_sample_alt_alleles),
+          .rejected_alleles = std::move(rejected_alleles),
         });
   } else {
     return {
-      .alt_alleles = alt_alleles,
+      .alt_alleles = target_sample_alt_alleles,
       .complex_variant_created = false,
       .ref_bases = "",
+      .non_target_sample_alleles = non_target_sample_alleles,
+      .non_target_allele_counts = std::move(non_target_allele_counts),
+      .rejected_alleles = std::move(rejected_alleles),
     };
   }
 }
@@ -610,9 +678,9 @@ void AddGenotypes(const std::string& sample_name,
   }
 }
 
-AlleleMap BuildAlleleMap(const AlleleCount& allele_count,
-                         absl::Span<const Allele> alt_alleles,
-                         absl::string_view ref_bases) {
+AlleleMap BuildAlleleMap(absl::Span<const Allele> alt_alleles,
+                         absl::string_view ref_bases,
+                         bool skip_ref_allele = false) {
   AlleleMap allele_map;
 
   // Compute the alt alleles, recording the mapping from each Allele to its
@@ -647,54 +715,10 @@ AlleleMap BuildAlleleMap(const AlleleCount& allele_count,
         break;
       default:
         // this includes AlleleType::REFERENCE which should have been removed
-        LOG(FATAL) << "Unexpected alt allele " << alt_allele.DebugString();
-    }
-  }
-
-  return allele_map;
-}
-
-AlleleMap RemoveInvalidDels(const AlleleMap& allele_map,
-                            absl::string_view ref_bases) {
-  AlleleMap allele_map_mod;
-  absl::btree_map<Allele, int, OrderAllele> read_counts;
-  int num_of_dels = 0;
-  bool has_deletion_adjacent_to_snp = false;
-
-  // Search for deletions and check if there is a deletion with the preceding
-  // SNP. SNP is followed by deletion if deletion's alt base is different from
-  // the ref.
-  // In addition, read count is stored for each deletion.
-  for (const auto& elt : allele_map) {
-    if (elt.first.type() == AlleleType::DELETION) {
-      read_counts[elt.first] += elt.first.count();
-      num_of_dels++;
-      if (elt.second[0] != ref_bases[0]) {
-        has_deletion_adjacent_to_snp = true;
-      }
-    }
-  }
-
-  // If more than 1 DELs and their alt bases are different we need to keep just
-  // one. The one with higher read support is kept.
-  if (num_of_dels > 1 && has_deletion_adjacent_to_snp) {
-    Allele max_allele =
-        std::max_element(read_counts.begin(), read_counts.end(),
-                         [](const std::pair<const Allele, int>& element1,
-                            const std::pair<const Allele, int>& element2) {
-                           return element1.second < element2.second;
-                         })
-            ->first;
-
-    if (!max_allele.bases().empty()) {
-      for (const auto& elt : allele_map) {
-        if ((elt.first.type() == AlleleType::DELETION &&
-             elt.second == allele_map.at(max_allele)) ||
-            elt.first.type() != AlleleType::DELETION) {
-          allele_map_mod[elt.first] = elt.second;
+        if (skip_ref_allele) {
+          break;
         }
-      }
-      return allele_map_mod;
+        LOG(FATAL) << "Unexpected alt allele " << alt_allele.DebugString();
     }
   }
   return allele_map;
@@ -740,6 +764,83 @@ void AddReadDepths(const AlleleCount& allele_count, const AlleleMap& allele_map,
     nucleus::SetInfoField(kADFormatField, ad, call);
     nucleus::SetInfoField(kVAFFormatField, vaf, call);
   }
+}
+
+// Constructs an allele map with alleles that are ordered using a matched
+// tumor allele map. Only alleles found in the matched tumor will be output.
+AlleleMap BuildMatchedNormalAlleleMap(
+  const std::vector<Allele>& normal_allele_count,
+  absl::string_view ref_bases,
+  const AlleleMap& allele_map) {
+  const AlleleMap normal_allele_map =
+      BuildAlleleMap(normal_allele_count, ref_bases, true);
+
+  AlleleMap normal_allele_map_ordered;
+  bool found_normal_match;
+
+  // TODO: remove double-loop in favor of a map lookup.
+  for (const auto& [tumor_alt_allele, tumor_allele_bases] : allele_map) {
+    found_normal_match = false;
+    for (const auto& [normal_alt_allele, normal_allele_bases] :
+          normal_allele_map) {
+      if (IsAllelesTheSame(tumor_alt_allele, normal_alt_allele)) {
+        found_normal_match = true;
+        normal_allele_map_ordered[normal_alt_allele] = normal_allele_bases;
+        break;
+      }
+    }
+    if (!found_normal_match) {
+      Allele empty_normal_allele;
+      // Set the allele type and bases, but not count.
+      empty_normal_allele.set_type(tumor_alt_allele.type());
+      empty_normal_allele.set_bases(tumor_alt_allele.bases());
+      normal_allele_map_ordered[empty_normal_allele] = tumor_allele_bases;
+    }
+  }
+  return normal_allele_map_ordered;
+}
+
+// Adds the NDP, NAD, and NAF fields to the tumor sample VariantCall.
+// NDP: the total number of observed reads at this site (in normal)
+// NAD: the number of reads supporting each of our ref and alt alleles.
+// NAF: the allele fraction of the variants (only including alt alleles).
+// These are calculated from the provided allele_count information. The
+// allele_map is needed to map between the Variant reference and alternate_bases
+// and the Alleles used in allele_count.
+void AddNormalReadDepths(const AlleleCount& allele_count,
+                         const AlleleMap& allele_map, Variant* variant) {
+  // Set the NDP to the total good reads seen at this position.
+  VariantCall* call = variant->mutable_calls(0);
+
+  nucleus::SetInfoField(kDPNormalFormatField, TotalAlleleCounts(allele_count),
+                        call);
+
+  int dp = TotalAlleleCounts(allele_count);
+  // Build up AD and VAF.
+  std::vector<int> ad;
+  std::vector<double> vaf;
+  ad.push_back(allele_count.ref_supporting_read_count());
+
+  absl::btree_map<absl::string_view, const Allele*> alt_to_alleles;
+  for (const auto& [allele, alt_bases] : allele_map) {
+    alt_to_alleles[alt_bases] = &allele;
+  }
+
+  for (const std::string& alt : variant->alternate_bases()) {
+    const auto it = alt_to_alleles.find(alt);
+    CHECK(it != alt_to_alleles.end())
+        << "Internal error: could not find alt " << alt
+        << " in normal allele map.";
+    const Allele& allele = *it->second;
+    ad.push_back(allele.count());
+    if (dp > 0) {
+      vaf.push_back(1.0 * allele.count() / dp);
+    } else {
+      vaf.push_back(0.0);
+    }
+  }
+  nucleus::SetInfoField(kADNormalFormatField, ad, call);
+  nucleus::SetInfoField(kVAFNormalFormatField, vaf, call);
 }
 
 // Returns true if the current site should be emitted, even if it's a reference
@@ -815,9 +916,12 @@ std::vector<T> VariantCaller::AlleleCountsGenerator(
 
 std::vector<DeepVariantCall> VariantCaller::CallsFromAlleleCounts(
     const std::unordered_map<std::string, AlleleCounter*>& allele_counters,
-    const std::string& target_sample) {
+    const std::string& target_sample,
+    const std::string& target_role) {
   this->allele_counters_per_sample_ = allele_counters;
   this->target_sample_ = target_sample;
+  this->target_role_ = target_role;
+
   // Get Allele counts for the target sample
   auto it = allele_counters.find(target_sample);
   if (it == allele_counters.end()) {
@@ -835,9 +939,11 @@ std::vector<DeepVariantCall> VariantCaller::CallsFromAlleleCounts(
 
 std::vector<int> VariantCaller::CallPositionsFromAlleleCounts(
     const std::unordered_map<std::string, AlleleCounter*>& allele_counters,
-    const std::string& target_sample) {
+    const std::string& target_sample,
+    const std::string& target_role) {
   this->allele_counters_per_sample_ = allele_counters;
   this->target_sample_ = target_sample;
+  this->target_role_ = target_role;
   // Get Allele counts for the target sample
   auto it = allele_counters.find(target_sample);
   if (it == allele_counters.end()) {
@@ -867,7 +973,7 @@ std::optional<int> VariantCaller::CallVariantPosition(
       {
       .allele_counts_by_sample = allele_counts_by_sample,
       .create_complex_alleles = false,
-      .prev_deletion_end = prev_deletion_end
+      .prev_deletion_end = prev_deletion_end,
     });
 
   // Include reference site as candidate for methylation-aware phasing if it is
@@ -918,7 +1024,8 @@ std::optional<DeepVariantCall> VariantCaller::CallVariant(
       {
       .allele_counts_by_sample = allele_counts_per_sample,
       .create_complex_alleles = options_.create_complex_alleles(),
-      .prev_deletion_end = prev_deletion_end
+      .prev_deletion_end = prev_deletion_end,
+      .use_rejected_alleles = options_.use_rejected_alleles(),
     });
   std::string ref_bases = output_options.ref_bases;
   bool complex_variant_created = output_options.complex_variant_created;
@@ -966,12 +1073,18 @@ std::optional<DeepVariantCall> VariantCaller::CallVariant(
   variant->set_reference_name(
       target_sample_allele_count.position().reference_name());
   variant->set_start(target_sample_allele_count.position().position());
+  if (!CanKeepRejectedDeletion(target_sample_allele_count.ref_base(),
+                              output_options.alt_alleles,
+                              output_options.rejected_alleles)) {
+    output_options.rejected_alleles.clear();
+  }
   // ref_bases are calculated by SelectAltAlleles only for complex variants.
   // Otherwise it is calculated here.
   if (ref_bases.empty()) {
     ref_bases =
         CalcRefBases(target_sample_allele_count.ref_base(),
-                     output_options.alt_alleles);
+                     output_options.alt_alleles,
+                     output_options.rejected_alleles);
   }
   variant->set_reference_bases(ref_bases);
   variant->set_end(variant->start() + ref_bases.size());
@@ -987,8 +1100,10 @@ std::optional<DeepVariantCall> VariantCaller::CallVariant(
   // Compute the map from read alleles to the alleles we'll use in our Variant.
   // Add the alternate alleles from our allele_map to the variant.
   const AlleleMap allele_map =
-      BuildAlleleMap(target_sample_allele_count,
-                     output_options.alt_alleles, ref_bases);
+      BuildAlleleMap(output_options.alt_alleles, ref_bases);
+  const AlleleMap allele_map_rejected =
+    BuildAlleleMap(output_options.rejected_alleles, ref_bases,
+                   /*skip_ref_allele=*/true);
 
   // Skip next skip_next_count allele counts if comexple variant was processed.
   if (ref_bases.size() > 1 && allele_map.size() > 1 &&
@@ -998,6 +1113,9 @@ std::optional<DeepVariantCall> VariantCaller::CallVariant(
 
   for (const auto& elt : allele_map) {
     variant->add_alternate_bases(elt.second);
+  }
+  for (const auto& elt : allele_map_rejected) {
+    variant->add_alternate_bases_rejected(elt.second);
   }
 
   // If we don't have any alt_alleles, we are generating a reference site so
@@ -1010,12 +1128,34 @@ std::optional<DeepVariantCall> VariantCaller::CallVariant(
             StringPtrLessThan());
 
   AddReadDepths(target_sample_allele_count, allele_map, variant);
+  if (target_role_ == "tumor" &&
+      !output_options.non_target_allele_counts.empty()) {
+    // This logic handles adding NDP, NAD, and NAF to the tumor variant.
+    // An allele map for the normal sample is constructed, based on the
+    // tumor alleles.
+    AlleleMap matched_normal_allele_map = BuildMatchedNormalAlleleMap(
+        output_options.non_target_sample_alleles, ref_bases, allele_map);
+
+    if (!matched_normal_allele_map.empty()) {
+    // Filter and reorder the normal allele map to only contain the same
+    // alleles as the tumor allele map.
+    AddNormalReadDepths(output_options.non_target_allele_counts.at(0),
+                        matched_normal_allele_map,
+                        variant);
+    }
+  }
   if (output_options.complex_variant_created) {
+    // TODO: Add logic to add supporting reads for rejected alleles
+    // for complex variants.
     AddSupportingReads(output_options.allele_counts_mod, allele_map,
                       target_sample_, &call);
   } else {
     AddSupportingReads(allele_counts_per_sample, allele_map,
                       target_sample_, &call);
+    if (options_.use_rejected_alleles()) {
+      AddSupportingReadsForRejectedAlleles(allele_counts_per_sample,
+                        allele_map_rejected, target_sample_, &call);
+    }
   }
   if (options_.small_model_vaf_context_window_size() > 0) {
     AddAdjacentAlleleFractionsAtPosition(
@@ -1104,6 +1244,42 @@ void VariantCaller::AddSupportingReads(
         read_info->set_sample_name(sample_name);
         read_info->set_is_methylated(allele.is_methylated());
         read_info->set_methylation_level(allele.methylation_level());
+      }
+    }
+  }
+}
+
+// This function is almost exact copy of AddSupportingReads, but it adds
+// rejected alleles to a different proto field in DeepVariantCall.
+void VariantCaller::AddSupportingReadsForRejectedAlleles(
+  const absl::node_hash_map<std::string, AlleleCount>& allele_counts,
+  const AlleleMap& allele_map, absl::string_view target_sample,
+  DeepVariantCall* call) const {
+  // Iterate over each read in the allele_count, and add its name to the
+  // supporting reads of for the Variant allele it supports.
+  const std::string unknown_allele = kSupportingUncalledAllele;
+  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>>
+      alt_allele_support;
+  for (const auto& [sample_name, allele_count] : allele_counts) {
+    for (const auto& [read_name, allele] : allele_count.read_alleles()) {
+      // Skip reference supporting reads, as they aren't included in the
+      // supporting reads for alternate alleles.
+      if (allele.type() != AlleleType::REFERENCE) {
+        auto it = FindAllele(allele, allele_map);
+        const std::string& supported_allele =
+            it == allele_map.end() ? unknown_allele : it->second;
+        DeepVariantCall::SupportingReads& supports =
+            (*call->mutable_rejected_allele_support())[supported_allele];
+        // Check that this read does not exist in supports already. It may
+        // happen if candidate is created from multiple samples and read with
+        // the same id exists in multiple samples. Multiple problems may arise
+        // from this: number of supporting reads is calculated incorrectly,
+        // phasing may not work due to loops in the graph caused by multiple
+        // reads with the same id supporting the same allele.
+        auto [new_item, is_inserted] =
+            alt_allele_support[supported_allele].insert(read_name);
+        if (!is_inserted) continue;
+        supports.add_read_names(read_name);
       }
     }
   }

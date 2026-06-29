@@ -1,3 +1,5 @@
+# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+# load("@rules_cc//cc:cc_test.bzl", "cc_test")
 # Placeholder: load py_library
 # Placeholder: load py_test
 
@@ -79,9 +81,9 @@ py_test(
     srcs = ["window_selector_test.py"],
     deps = [
         ":window_selector",
-        "//deepvariant:py_testdata",
         "//deepvariant/protos:realigner_py_pb2",
         "//third_party/nucleus/io:fasta",
+        "//third_party/nucleus/testing:py_test_utils",
         "//third_party/nucleus/util:ranges",
         "@absl_py//absl/testing:absltest",
         "@absl_py//absl/testing:parameterized",
@@ -102,7 +104,6 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:node_hash_set",
-        "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
@@ -121,10 +122,7 @@ cc_library(
     name = "ssw",
     srcs = ["ssw.cc"],
     hdrs = ["ssw.h"],
-    deps = [
-        "@com_google_absl//absl/strings:cord",
-        "@libssw//:ssw_cpp",
-    ],
+    deps = ["@libssw//:ssw_cpp"],
 )
 
 cc_test(

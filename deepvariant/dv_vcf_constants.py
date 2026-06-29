@@ -29,10 +29,11 @@
 """Library for generating VCF information created by DeepVariant."""
 
 from third_party.nucleus.protos import variants_pb2
+from third_party.nucleus.util import variant_utils
 from third_party.nucleus.util import vcf_constants
 
 # Current release version of DeepVariant.
-DEEP_VARIANT_VERSION = '1.9.0'
+DEEP_VARIANT_VERSION = '1.10.0'
 
 # FILTER field IDs.
 DEEP_VARIANT_PASS = 'PASS'
@@ -52,12 +53,39 @@ DEEP_VARIANT_MODEL_ID_FORMAT = 'MID'
 UNCALLED_GENOTYPE = -1
 
 
+# Format Fields specific to T-N somatic calling.
+SOMATIC_FORMAT_FIELDS = [
+    variants_pb2.VcfFormatInfo(
+        id='NDP',
+        number='1',
+        type=vcf_constants.INTEGER_TYPE,
+        description='Number of reads in the normal sample.',
+    ),
+    variants_pb2.VcfFormatInfo(
+        id='NAD',
+        number='R',
+        type=vcf_constants.INTEGER_TYPE,
+        description=(
+            'Read depth in the normal sample for alleles reported in the tumor'
+            ' sample'
+        ),
+    ),
+    variants_pb2.VcfFormatInfo(
+        id='NAF',
+        number='R',
+        type=vcf_constants.FLOAT_TYPE,
+        description='VAF of ALT alleles in the normal sample.',
+    ),
+]
+
+
 def deepvariant_header(
     contigs,
     sample_names,
     add_info_candidates=False,
     include_med_dp=True,
     include_model_id=False,
+    include_somatic_fields=False,
 ):
   """Returns a VcfHeader used for writing VCF output.
 
@@ -74,6 +102,7 @@ def deepvariant_header(
       purposes.
     include_med_dp: boolean. If True, we will include MED_DP.
     include_model_id: boolean, If True, tag variants by model that called them.
+    include_somatic_fields: boolean, If True, add somatic-specific fields.
 
   Returns:
     A nucleus.genomics.v1.VcfHeader proto with known fixed headers and the given
@@ -108,6 +137,7 @@ def deepvariant_header(
       vcf_constants.reserved_format_field('MF'),
       vcf_constants.reserved_format_field('MD'),
       vcf_constants.reserved_format_field('MT'),
+      vcf_constants.reserved_format_field('MI'),
   ]
   if add_info_candidates:
     info_fields.append(
@@ -141,6 +171,9 @@ def deepvariant_header(
         )
     )
 
+  if include_somatic_fields:
+    formats.extend(SOMATIC_FORMAT_FIELDS)
+
   return variants_pb2.VcfHeader(
       fileformat='VCFv4.2',
       filters=[
@@ -167,3 +200,28 @@ def deepvariant_header(
       sample_names=sample_names,
       extras=[version],
   )
+
+
+def compute_filter_fields(
+    variant: variants_pb2.Variant, min_quality: float
+) -> list[str]:
+  """Computes the filter fields for this variant.
+
+  Variant filters are generated based on its quality score value and particular
+  genotype call.
+
+  Args:
+    variant: Variant to filter.
+    min_quality: Minimum acceptable phred scaled variant detection probability.
+
+  Returns:
+    Filter field strings to be added to the variant.
+  """
+  if variant_utils.genotype_type(variant) == variant_utils.GenotypeType.no_call:
+    return [DEEP_VARIANT_NO_CALL]
+  if variant_utils.genotype_type(variant) == variant_utils.GenotypeType.hom_ref:
+    return [DEEP_VARIANT_REF_FILTER]
+  elif variant.quality < min_quality:
+    return [DEEP_VARIANT_QUAL_FILTER]
+  else:
+    return [DEEP_VARIANT_PASS]
