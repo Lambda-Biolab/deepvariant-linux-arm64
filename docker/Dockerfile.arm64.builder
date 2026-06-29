@@ -45,7 +45,8 @@ ENV VERSION=${VERSION}
 WORKDIR /opt/deepvariant
 
 # Bazel compilation of all C++ binaries (~1hr native ARM64, ~4hr+ under QEMU)
-RUN chmod +x scripts/build/build-prereq-arm64.sh scripts/build/build_release_binaries_arm64.sh && \
+# Reason: chmod all scripts — build-prereq-arm64.sh executes run-prereq.sh directly
+RUN chmod +x scripts/build/*.sh && \
     ./scripts/build/build-prereq-arm64.sh \
     && PATH="${HOME}/.local/bin:${HOME}/bin:${PATH}" uv pip install --reinstall-package cryptography --reinstall-package cffi cryptography cffi "httplib2<0.22" \
     && PATH="${HOME}/bin:${PATH}" ./scripts/build/build_release_binaries_arm64.sh
