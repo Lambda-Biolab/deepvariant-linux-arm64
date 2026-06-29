@@ -3,7 +3,7 @@ message: "If you use this software, please cite it as below."
 type: software
 title: "DeepVariant Linux ARM64 Native Build"
 abstract: >
-  First open-source Linux ARM64 port of Google DeepVariant v1.9.0,
+  Open-source Linux ARM64 port of Google DeepVariant v1.10.0,
   with INT8 ONNX quantization that preserves WGS accuracy relative to
   the FP32 ARM64 baseline (SNP F1 delta <0.0001, chr20), with a small
   WES INDEL F1 reduction (-0.0038) within expected post-training
@@ -16,12 +16,11 @@ authors:
     given-names: Antonio
     orcid: "https://orcid.org/0000-0003-0885-2585"
     affiliation: "Lamb Consulting"
-version: "1.9.0-arm64.7"
-doi: "10.5281/zenodo.18909055"
-date-released: "2026-03-08"
+version: "1.10.0-arm64.1"
+date-released: "2026-06-29"
 license: BSD-3-Clause
-repository-code: "https://github.com/antomicblitz/deepvariant-linux-arm64"
-url: "https://github.com/antomicblitz/deepvariant-linux-arm64"
+repository-code: "https://github.com/Lambda-Biolab/deepvariant-linux-arm64"
+url: "https://github.com/Lambda-Biolab/deepvariant-linux-arm64"
 keywords:
   - genomics
   - variant-calling
