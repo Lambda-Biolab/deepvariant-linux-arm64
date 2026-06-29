@@ -56,12 +56,12 @@ class HomopolymerInsertionQualityChannel
       int width,
       const learning::genomics::deepvariant::PileupImageOptions& options);
 
-  void FillReadBase(std::vector<unsigned char>& data, int col, char read_base,
+  void FillReadBase(unsigned char* data, int col, char read_base,
                     char ref_base, int base_quality, const Read& read,
                     int read_index, const DeepVariantCall& dv_call,
                     const std::vector<std::string>& alt_alleles) override;
 
-  void FillRefBase(std::vector<unsigned char>& ref_data, int col, char ref_base,
+  void FillRefBase(unsigned char* ref_data, int col, char ref_base,
                    const std::string& ref_bases) override;
 
  private:

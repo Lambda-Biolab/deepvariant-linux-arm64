@@ -51,7 +51,7 @@ InterHomopolymerInsertionQualityChannel::
     : Channel(width, options) {}
 
 void InterHomopolymerInsertionQualityChannel::FillReadBase(
-    std::vector<unsigned char>& data, int col, char read_base, char ref_base,
+    unsigned char* data, int col, char read_base, char ref_base,
     int base_quality, const Read& read, int read_index,
     const DeepVariantCall& dv_call,
     const std::vector<std::string>& alt_alleles) {
@@ -67,9 +67,9 @@ void InterHomopolymerInsertionQualityChannel::FillReadBase(
 }
 
 void InterHomopolymerInsertionQualityChannel::FillRefBase(
-    std::vector<unsigned char>& ref_data, int col, char ref_base,
+    unsigned char* ref_data, int col, char ref_base,
     const std::string& ref_bases) {
-  ref_data.push_back(0);
+  ref_data[col] = 0;
 }
 
 std::vector<std::uint8_t> InterHomopolymerInsertionQualityChannel::GetT0Values(
