@@ -65,14 +65,17 @@ class SyntheticCalibrationDataReader:
         self._input_name = sess.get_inputs()[0].name
         del sess
 
-        # Get input shape from example_info.json
+        # Get input shape from model.example_info.json (v1.10.0+)
+        # or example_info.json (v1.9.0 and earlier)
         input_shape = [100, 221, 7]
         if saved_model_dir:
-            info_path = os.path.join(saved_model_dir, 'example_info.json')
-            if os.path.exists(info_path):
-                with open(info_path) as f:
-                    info = json.load(f)
-                input_shape = info.get('shape', input_shape)
+            for info_name in ('model.example_info.json', 'example_info.json'):
+                info_path = os.path.join(saved_model_dir, info_name)
+                if os.path.exists(info_path):
+                    with open(info_path) as f:
+                        info = json.load(f)
+                    input_shape = info.get('shape', input_shape)
+                    break
 
         self._input_shape = tuple(input_shape)
         self._num_samples = num_samples
