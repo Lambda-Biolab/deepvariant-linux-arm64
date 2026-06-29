@@ -9,7 +9,7 @@
 [![accuracy](https://img.shields.io/badge/SNP%20F1-0.9961%20(full%20genome)-success)](#accuracy--full-genome-validation)
 [![license](https://img.shields.io/badge/license-BSD--3-blue)](#license)
 
-> Fork of [google/deepvariant](https://github.com/google/deepvariant) v1.9.0. Tags: `v{upstream}-arm64.{n}`.
+> Fork of [google/deepvariant](https://github.com/google/deepvariant) v1.10.0. Tags: `v{upstream}-arm64.{n}`.
 
 **The gold standard in variant calling. Now on ARM64. For less than the price of a chewing gum per genome.**
 
@@ -25,13 +25,13 @@ At [UK Biobank](https://doi.org/10.1038/s41586-025-09272-9) scale (490,640 genom
 
 ```bash
 # If your machine has less than 32 GB RAM, add swap first (one-time, auto-sized):
-curl -fsSL https://raw.githubusercontent.com/antomicblitz/deepvariant-linux-arm64/main/scripts/setup_swap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/lambda-biolab/deepvariant-linux-arm64/main/scripts/setup_swap.sh | sudo bash
 
-docker pull ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6
+docker pull ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1
 
 docker run \
   -v /path/to/data:/data \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   /opt/deepvariant/scripts/run_parallel_cv.sh \
   --model_type=WGS \
   --ref=/data/reference.fasta \
@@ -50,7 +50,7 @@ The script auto-detects your CPU (Graviton3/4, AmpereOne, Neoverse-N1/N2), enabl
 docker run -v /path/to/data:/data \
   -e TF_ENABLE_ONEDNN_OPTS=1 -e ONEDNN_DEFAULT_FPMATH_MODE=BF16 \
   -e OMP_NUM_THREADS=$(nproc) -e OMP_PROC_BIND=false -e OMP_PLACES=cores \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   /opt/deepvariant/bin/run_deepvariant \
   --model_type=WGS --ref=/data/reference.fasta --reads=/data/input.bam \
   --output_vcf=/data/output.vcf.gz --num_shards=$(nproc) \
@@ -64,7 +64,7 @@ The Docker image ships with a pre-quantized WGS INT8 model. To quantize a differ
 ```bash
 # Step 1: Run the pipeline to generate calibration TFRecords
 docker run -v /path/to/data:/data \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   /opt/deepvariant/bin/run_deepvariant \
   --model_type=WGS --ref=/data/reference.fasta --reads=/data/input.bam \
   --output_vcf=/data/output.vcf.gz --num_shards=$(nproc) \
@@ -72,7 +72,7 @@ docker run -v /path/to/data:/data \
 
 # Step 2: Quantize (one-time, ~2 min)
 docker run -v /path/to/data:/data \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   quantize_model \
   --input /opt/models/wgs/model.onnx \
   --output /data/model_int8_custom.onnx \
@@ -81,7 +81,7 @@ docker run -v /path/to/data:/data \
 
 # Step 3: Use the custom INT8 model
 docker run -v /path/to/data:/data \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   /opt/deepvariant/bin/run_deepvariant \
   --model_type=WGS --ref=/data/reference.fasta --reads=/data/input.bam \
   --output_vcf=/data/output.vcf.gz --num_shards=$(nproc) \
@@ -98,7 +98,7 @@ On NVMe or tmpfs storage, add `--nocompress_intermediates` to skip gzip on TFRec
 ```bash
 docker run -v /path/to/data:/data \
   -e DV_AUTOCONFIG=1 -e DV_USE_JEMALLOC=1 \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   /opt/deepvariant/bin/run_deepvariant \
   --model_type=WGS --ref=/data/reference.fasta --reads=/data/input.bam \
   --output_vcf=/data/output.vcf.gz --num_shards=$(nproc) \
@@ -291,7 +291,7 @@ Works on Ubuntu 22.04/24.04. Installs Docker, build essentials, and writes CPU-s
 echo "$GITHUB_PAT" | docker login ghcr.io -u USERNAME --password-stdin
 
 # Pull (~2-4 GB compressed)
-docker pull ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6
+docker pull ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1
 ```
 
 ### Platform-specific notes
@@ -392,7 +392,7 @@ wget -q -P /data/truth/ ${BUCKET}/HG003_GRCh38_1_22_v4.2.1_benchmark_noinconsist
 docker run \
   -v /data:/data \
   -e DV_AUTOCONFIG=1 -e DV_USE_JEMALLOC=1 \
-  ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.6 \
+  ghcr.io/lambda-biolab/deepvariant-arm64:v1.10.0-arm64.1 \
   /opt/deepvariant/bin/run_deepvariant \
   --model_type=WGS \
   --ref=/data/reference/GRCh38_no_alt_analysis_set.fasta \
@@ -441,7 +441,7 @@ bash scripts/benchmark_full_chr20.sh --data-dir /data
 **Prerequisites:** ARM64 Linux (Ubuntu 24.04, GCC 13+), 16 GB RAM + 8 GB swap, ~50 GB disk, Python 3.10.
 
 ```bash
-git clone https://github.com/antomicblitz/deepvariant-linux-arm64.git
+git clone https://github.com/lambda-biolab/deepvariant-linux-arm64.git
 cd deepvariant-linux-arm64
 
 cat > user.bazelrc << 'EOF'
