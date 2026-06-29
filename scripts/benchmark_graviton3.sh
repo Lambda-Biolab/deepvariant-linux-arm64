@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-IMAGE="${IMAGE:-ghcr.io/antomicblitz/deepvariant-arm64:optimized}"
+IMAGE="${IMAGE:-ghcr.io/lambda-biolab/deepvariant-arm64:optimized}"
 DATA_DIR="${DATA_DIR:-/data}"
 REGION="chr20:1-30000000"
 BATCH_SIZE=256

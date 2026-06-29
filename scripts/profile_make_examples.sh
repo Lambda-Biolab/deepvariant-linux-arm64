@@ -15,7 +15,7 @@
 #
 # Options:
 #   --data-dir DIR       Data directory (default: /data)
-#   --image IMAGE        Docker image (default: ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.2)
+#   --image IMAGE        Docker image (default: ghcr.io/lambda-biolab/deepvariant-arm64:v1.9.0-arm64.2)
 #   --region REGION      Region (default: chr20)
 #   --num-shards N       Number of ME shards (default: nproc)
 #   --skip-jemalloc      Skip the jemalloc comparison run
@@ -50,7 +50,7 @@ set -euo pipefail
 # ============================================================
 # Defaults
 # ============================================================
-IMAGE="ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.5"
+IMAGE="ghcr.io/lambda-biolab/deepvariant-arm64:v1.9.0-arm64.5"
 DATA_DIR="/data"
 REGION="chr20"
 NUM_SHARDS=""

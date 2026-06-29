@@ -7,7 +7,7 @@
 # Usage: bash scripts/benchmark_full_chr20.sh [--data-dir /data]
 set -euo pipefail
 
-IMAGE="ghcr.io/antomicblitz/deepvariant-arm64:optimized"
+IMAGE="ghcr.io/lambda-biolab/deepvariant-arm64:optimized"
 DATA_DIR="${DATA_DIR:-/data}"
 # Auto-detect available RAM — use 90% to leave headroom for OS.
 # Hardcoding 28g caused OOM on machines with <32 GB (e.g. Hetzner CAX41 has 30 GB).

@@ -5,7 +5,7 @@ set -euo pipefail
 # Run this on a fresh Ubuntu 22.04/24.04 ARM64 instance before building.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/antomicblitz/deepvariant-linux-arm64/main/scripts/setup_graviton.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Lambda-Biolab/deepvariant-linux-arm64/main/scripts/setup_graviton.sh | bash
 
 echo "========== DeepVariant ARM64 Instance Setup =========="
 
@@ -100,6 +100,6 @@ echo "========== Setup complete! =========="
 echo ""
 echo "Next steps:"
 echo "  1. Log out and back in (for Docker group)"
-echo "  2. Clone the repo:  git clone https://github.com/antomicblitz/deepvariant-linux-arm64.git"
+echo "  2. Clone the repo:  git clone https://github.com/Lambda-Biolab/deepvariant-linux-arm64.git"
 echo "  3. Build:           cd deepvariant-linux-arm64 && docker build -f Dockerfile.arm64 -t deepvariant-arm64 ."
 echo ""

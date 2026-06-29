@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-IMAGE="${IMAGE:-ghcr.io/antomicblitz/deepvariant-arm64:v1.9.0-arm64.4}"
+IMAGE="${IMAGE:-ghcr.io/lambda-biolab/deepvariant-arm64:v1.9.0-arm64.4}"
 REF="/data/reference/GRCh38_no_alt_analysis_set.fasta"
 BAM="/data/bam/HG003.novaseq.pcr-free.35x.dedup.grch38_no_alt.chr20.bam"
 REGION="chr20"

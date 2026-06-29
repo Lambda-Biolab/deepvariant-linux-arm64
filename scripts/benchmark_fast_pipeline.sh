@@ -17,7 +17,7 @@
 #   bash scripts/benchmark_fast_pipeline.sh --partitioned --me-cores 0-15 --cv-cores 16-31
 set -euo pipefail
 
-IMAGE="${IMAGE:-ghcr.io/antomicblitz/deepvariant-arm64:optimized}"
+IMAGE="${IMAGE:-ghcr.io/lambda-biolab/deepvariant-arm64:optimized}"
 DATA_DIR="${DATA_DIR:-/data}"
 DOCKER_MEM="${DOCKER_MEM:-28g}"
 SHM_SIZE="${SHM_SIZE:-4g}"
