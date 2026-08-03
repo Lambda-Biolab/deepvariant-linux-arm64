@@ -1,7 +1,9 @@
 # Changelog
 
 All notable changes to the DeepVariant ARM64 fork are documented here.
-Upstream compatibility: google/deepvariant v1.9.0
+Historical entries below cover the v1.9.0 ARM64 releases. The current source
+tracks Google DeepVariant v1.10.0; see `README.md` and `CITATION.cff` for the
+current compatibility and release metadata.
 
 ## [v1.9.0-arm64.4] — 2026-03-06
 
