@@ -1,0 +1,52 @@
+# Auto-deletes head branches after their PR is closed (merged or not).
+#
+# Without this, automation-generated branches (auto/llms-txt-*, auto/sbom-update-*,
+# dependabot/*, etc.) accumulate as garbage once the PR is closed or merged — the
+# PR-rendered "Delete branch" button is one click per PR and never gets clicked.
+#
+# Triggers on pull_request: closed (NOT opened, NOT synchronize) so it only fires
+# once, at the end of the PR lifecycle.
+#
+# Skips:
+# - default branch (main / master) — never delete those
+# - cross-fork PRs (head.ref from a different repo) — we can't delete those
+#
+# Permissions: only `contents: write` is needed (no PR/admin perms).
+
+name: Auto-delete head branches
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  delete-head-branch:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Delete head branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Defensive: never delete the default branch
+          case "$BRANCH" in
+            main|master)
+              echo "Refusing to delete default branch: $BRANCH"
+              exit 0
+              ;;
+          esac
+          # 404 (already gone) is fine; anything else is a real failure we'd want to know about
+          status=$(gh api -X DELETE \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${REPO}/git/refs/heads/${BRANCH}" \
+            --silent --output /dev/null --write-out '%{http_code}' || echo "000")
+          case "$status" in
+            204|404) echo "OK (deleted or already gone): $BRANCH" ;;
+            *) echo "Failed to delete $BRANCH: HTTP $status"; exit 1 ;;
+          esac
