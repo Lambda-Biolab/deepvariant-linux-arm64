@@ -41,11 +41,14 @@ jobs:
               exit 0
               ;;
           esac
-          # 404 (already gone) is fine; anything else is a real failure we'd want to know about
-          status=$(gh api -X DELETE \
+          # 404 (already gone) is fine; anything else is a real failure we'd want to know about.
+          # Use curl directly because we need the HTTP status code, and `gh api` does not expose
+          # %{http_code} the way curl does.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -X DELETE \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "repos/${REPO}/git/refs/heads/${BRANCH}" \
-            --silent --output /dev/null --write-out '%{http_code}' || echo "000")
+            "https://api.github.com/repos/${REPO}/git/refs/heads/${BRANCH}" 2>/dev/null || echo "000")
           case "$status" in
             204|404) echo "OK (deleted or already gone): $BRANCH" ;;
             *) echo "Failed to delete $BRANCH: HTTP $status"; exit 1 ;;
